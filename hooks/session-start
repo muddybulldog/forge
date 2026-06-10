@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# theforge SessionStart hook.
+# Injects a small flow reminder ONLY in repos that use the theforge flow
+# (docs/theforge/ or .theforge/ exists). Everywhere else: no output, zero tokens.
+# Discovery doesn't depend on this hook — skill descriptions handle that.
+
+set -euo pipefail
+
+# Signal check: walk from cwd to the git root (or filesystem root) looking for
+# docs/theforge/ or .theforge/. mkdir .theforge = manual opt-in.
+dir="$PWD"
+signal=""
+while :; do
+    if [ -d "$dir/docs/theforge" ] || [ -d "$dir/.theforge" ]; then
+        signal="$dir"
+        break
+    fi
+    [ -d "$dir/.git" ] && break   # stop at repo root
+    parent="$(dirname "$dir")"
+    [ "$parent" = "$dir" ] && break
+    dir="$parent"
+done
+
+# No signal: emit nothing.
+[ -z "$signal" ] && exit 0
+
+context="This project uses the theforge flow: brainstorm -> spec (docs/theforge/specs/) -> plan (docs/theforge/plans/) -> TDD execution, with user approval gates between stages. Before feature work, read docs/theforge/DECISIONS.md (logged decisions are constraints) and check docs/theforge/ROADMAP.md for the current phase, if they exist. Log new decisions and deferrals per the theforge:project-memory skill."
+
+printf '{\n  "hookSpecificOutput": {\n    "hookEventName": "SessionStart",\n    "additionalContext": "%s"\n  }\n}\n' "$context"
+exit 0

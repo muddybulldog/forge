@@ -1,0 +1,51 @@
+# theforge
+
+A token-efficient development flow for Claude Code. Personal fork of
+[superpowers](https://github.com/obra/superpowers) v5.1.0, rebuilt for current
+models and harness capabilities — roughly the same discipline at a fraction of
+the token cost.
+
+## The flow
+
+**Brainstorm → spec → plan → implement**, with approval gates between each stage.
+Brainstorming turns an idea into a user-reviewed spec (`docs/theforge/specs/`).
+Planning turns the spec into a plan of *what and where* — files, interfaces, test
+cases, acceptance criteria, never implementation code (`docs/theforge/plans/`).
+Execution runs task-by-task with strict TDD, inline for small plans or via a
+Workflow for large ones, with review proportional to risk. A project-memory layer
+(`ROADMAP.md`, `DECISIONS.md`, `DEFERRALS.md`) keeps durable context across
+sessions: decisions are read before feature builds; agents may defer non-spec
+scope but must log why.
+
+## Skills
+
+| Skill | Purpose |
+|---|---|
+| `brainstorming` | Idea → validated design → spec, through one-question-at-a-time dialogue. Includes the browser-based visual companion for mockups. |
+| `planning` | Spec → implementation plan (what/where, no code) → execution. |
+| `tdd` | Red-green-refactor discipline, kept nearly verbatim from superpowers. |
+| `project-memory` | Formats and rules for ROADMAP / DECISIONS / DEFERRALS. |
+
+## Hooks
+
+One conditional `SessionStart` hook: injects ~60 words of flow context, but only
+in repos that use the flow (`docs/theforge/` or `.theforge/` exists). Everywhere
+else it emits nothing. Skill discovery doesn't depend on it — frontmatter
+descriptions handle that in every session.
+
+## Install
+
+```bash
+claude plugin marketplace add ~/development/theforge
+claude plugin install theforge@theforge-local
+```
+
+After editing skills in this repo, reinstall (or re-add the marketplace) to pick
+up changes.
+
+## What was cut from superpowers and why
+
+See `docs/notes/superpowers-assessment.md` — the full skill-by-skill assessment.
+Headlines: plans no longer embed implementation code (the single biggest token
+sink), per-task review is proportional instead of three agents per task, and the
+800-word every-session hook injection is gone.

@@ -1,0 +1,14 @@
+{
+  "name": "theforge-local",
+  "owner": {
+    "name": "Bryan Inagaki",
+    "email": "bryan@inagaki.us"
+  },
+  "plugins": [
+    {
+      "name": "theforge",
+      "source": "./",
+      "description": "Token-efficient development flow: brainstorm → spec → plan → TDD execution, with project memory."
+    }
+  ]
+}
