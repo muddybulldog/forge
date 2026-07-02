@@ -1,5 +1,13 @@
 # Decisions
 
+## 2026-07-02 — Execution efficiency rules live in the planning skill; reviewer rules live in agent files, split by actor
+**Why:** Each rule loads only where it binds: reviewer-facing integrity rules (read-only, "can't verify from diff" is a valid verdict, implementer rationales never suppress findings) go in forge-standard/forge-deep review paragraphs — relaying them through orchestrator prompts is where rules get dropped; the orchestrator-facing rule (never pre-rate severity) stays in the planning Execution section. Rejected: a separate execution reference file (planning skill loads whole at execution anyway — indirection without savings). Context-lifetime rule replaces the ≤3-task inline threshold; forge-deep gains the final-integration-review role for multi-task plans.
+**Where:** docs/theforge/specs/2026-07-02-phase2-execution-efficiency-design.md, skills/planning/SKILL.md, agents/
+
+## 2026-07-02 — Two stdlib Python scripts with ephemeral output; spec sections declared on the task at plan time
+**Why:** Scripts must eliminate model reading, not typing: extract-brief.py assembles worker briefs (plan header + task block + declared spec sections), review-packet.py bundles task metadata + git diff for reviewers — plan, spec, and diff content never transit the orchestrator. Spec sections are declared per-task via a `**Spec:**` heading-list line written when the planner has full context, so extraction is fully mechanical (rejected: CLI-arg section refs at dispatch — requires the orchestrator to read the spec, the exact reading being eliminated). Python stdlib over bash/awk for parsing robustness; `--out` defaults ephemeral, nothing committed (rejected: committed briefs dir — per-dispatch artifacts polluting target-repo history). Both scripts fail loudly over emitting thin briefs.
+**Where:** docs/theforge/specs/2026-07-02-phase2-execution-efficiency-design.md, scripts/
+
 ## 2026-07-02 — Three-gear pipeline; gear 2 lives inside the brainstorming skill
 **Why:** Proportionality at pipeline level: gear 1 = trigger floors (unchanged), gear 2 = delta to an already-spec'd system (conversational design, one gate, straight to tdd — no spec/plan files), gear 3 = full flow for new architecture. Routing test is architectural (creates vs. operates within), not size. Rejected: a separate gear-2 skill (fourth trigger surface that must not mis-fire against brainstorming's) and putting the gear-2 procedure in planning (the gate is design dialogue, which brainstorming owns). Tripwires: no nameable owning spec → gear 3; design outgrows a paragraph → escalate, never stretch the conversational gate.
 **Where:** docs/theforge/specs/2026-07-02-phase1-pipeline-skill-edits-design.md, skills/brainstorming/SKILL.md
