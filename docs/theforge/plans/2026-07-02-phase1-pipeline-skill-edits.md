@@ -88,7 +88,7 @@
 **Depends on:** nothing.
 
 ### Task 4: README refresh + release
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `README.md` (flow paragraph + skills table: gear routing, living specs, `ideas/` input)
