@@ -14,7 +14,7 @@
 - Docs-only repo, no test harness; per the TDD infrastructure gate, verification = each task's acceptance commands.
 
 ### Task 1: Brainstorming skill — gears, ideation handoff, flow edits, living specs
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `skills/brainstorming/SKILL.md` (spec §1.1–§1.4)
