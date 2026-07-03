@@ -41,7 +41,7 @@ review-packet.py <plan.md> <task-number> --base <git-ref> [--out <dir>]
 ```
 
 - Output: `<out>/task-<N>-review.md`; prints path to stdout.
-- Contents: Task N block (interface, tests, acceptance) + `git diff <base>` output.
+- Contents: Task N block (interface, tests, acceptance) + `git diff <base>` output in a fenced `diff` block; fence length exceeds the longest backtick run in the diff body (min 3).
 - Missing task number or failed git invocation → nonzero exit + message on stderr.
 
 ### Shared behavior
@@ -67,3 +67,7 @@ review-packet.py <plan.md> <task-number> --base <git-ref> [--out <dir>]
 - Codex dual-harness packaging (phase 3).
 - Workflow script template (deferred: DEFERRALS 2026-06-10).
 - Tier-down A/B experiment (deferred: DEFERRALS 2026-07-02).
+
+## Changelog
+
+2026-07-03: review-packet fence length adapts to diff content; error-path tests pin relayed stderr text (post-review fix)

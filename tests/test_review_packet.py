@@ -114,12 +114,43 @@ class ReviewPacketGitFixtureTests(unittest.TestCase):
     def test_bad_git_ref_exits_nonzero_with_stderr_relayed(self):
         result = run_script([self.plan_path, "1", "--base", "not-a-real-ref-xyz"])
         self.assertNotEqual(result.returncode, 0)
-        self.assertTrue(result.stderr.strip())
+        self.assertIn("not-a-real-ref-xyz", result.stderr)
 
     def test_unknown_task_number_exits_nonzero(self):
         result = run_script([self.plan_path, "99", "--base", self.commit1])
         self.assertNotEqual(result.returncode, 0)
-        self.assertTrue(result.stderr.strip())
+        self.assertIn("Task 99", result.stderr)
+
+    def test_fence_survives_backtick_lines_in_diff(self):
+        doc_path = os.path.join(self.repo_dir, "doc.md")
+        with open(doc_path, "w") as f:
+            f.write("intro\n```\ncode\n```\nend\n")
+        self._git("add", ".")
+        self._git("commit", "-m", "add doc with fences")
+        base = self._git_output("rev-parse", "HEAD").strip()
+        with open(doc_path, "a") as f:
+            f.write("changed tail\n")
+        self._git("add", ".")
+        self._git("commit", "-m", "change near fences")
+
+        out_dir = tempfile.mkdtemp(prefix="review-packet-out-")
+        self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)
+        result = run_script([self.plan_path, "1", "--base", base, "--out", out_dir])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(result.stdout.strip()) as f:
+            lines = f.read().splitlines()
+
+        open_idx, fence = next(
+            (i, l[: len(l) - len(l.lstrip("`"))])
+            for i, l in enumerate(lines)
+            if l.startswith("`") and l.endswith("diff")
+        )
+        body = lines[open_idx + 1 : len(lines) - 1 - lines[::-1].index(fence)]
+        self.assertIn(" ```", body)
+        for line in body:
+            stripped = line.lstrip(" ")
+            run = len(stripped) - len(stripped.lstrip("`"))
+            self.assertLess(run, len(fence), "diff body line closes the outer fence: %r" % line)
 
     def test_out_dir_honored_and_path_printed(self):
         out_dir = tempfile.mkdtemp(prefix="review-packet-out-")

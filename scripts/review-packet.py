@@ -45,7 +45,13 @@ def build_packet(task_block, base, diff_output):
         diff_body = diff_output
         if not diff_body.endswith("\n"):
             diff_body += "\n"
-    diff_section = "```diff\n" + diff_body + "```\n"
+    # Fence must outrun any backtick run in the diff so a diffed line like
+    # " ```" (context-prefixed fence, ≤3-space indent) can't close it early.
+    longest_run = max(
+        (len(m.group(0)) for m in re.finditer(r"`+", diff_body)), default=0
+    )
+    fence = "`" * max(3, longest_run + 1)
+    diff_section = fence + "diff\n" + diff_body + fence + "\n"
     return task_block.rstrip("\n") + "\n\n" + diff_section
 
 
