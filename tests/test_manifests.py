@@ -18,6 +18,10 @@ CLAUDE_MARKETPLACE_MANIFEST = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 CODEX_PLUGIN_MANIFEST = REPO_ROOT / ".codex-plugin" / "plugin.json"
 CODEX_MARKETPLACE_MANIFEST = REPO_ROOT / ".agents" / "plugins" / "marketplace.json"
 
+HOOKS_DIR = REPO_ROOT / "hooks"
+CLAUDE_HOOKS_MANIFEST = HOOKS_DIR / "hooks.json"
+CODEX_HOOKS_MANIFEST = HOOKS_DIR / "codex-hooks.json"
+
 KEBAB_CASE_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
@@ -87,6 +91,42 @@ class CodexMarketplaceManifestShapeTests(unittest.TestCase):
     def test_source_path_is_dot_slash_prefixed(self):
         plugin = self.manifest["plugins"][0]
         self.assertTrue(plugin["source"]["path"].startswith("./"))
+
+
+def _session_start_commands(hook_config):
+    """Flatten every command string wired to SessionStart in a hooks.json dict."""
+    commands = []
+    for matcher_group in hook_config.get("hooks", {}).get("SessionStart", []):
+        for hook in matcher_group.get("hooks", []):
+            if "command" in hook:
+                commands.append(hook["command"])
+    return commands
+
+
+class HookConfigTests(unittest.TestCase):
+    def test_all_hook_json_files_parse(self):
+        hook_json_files = sorted(HOOKS_DIR.glob("*.json"))
+        self.assertTrue(len(hook_json_files) >= 1)
+        for path in hook_json_files:
+            self.assertIsInstance(_load_json(path), dict)
+
+    def test_claude_hooks_json_wires_session_start_to_session_start_script(self):
+        config = _load_json(CLAUDE_HOOKS_MANIFEST)
+        commands = _session_start_commands(config)
+        self.assertTrue(
+            any("hooks/session-start" in command for command in commands),
+            f"expected a SessionStart command referencing hooks/session-start, got {commands}",
+        )
+
+    def test_codex_hooks_json_references_same_session_start_script_if_present(self):
+        if not CODEX_HOOKS_MANIFEST.exists():
+            self.skipTest("hooks/codex-hooks.json not present (shared hooks.json outcome)")
+        config = _load_json(CODEX_HOOKS_MANIFEST)
+        commands = _session_start_commands(config)
+        self.assertTrue(
+            any("hooks/session-start" in command for command in commands),
+            f"expected a SessionStart command referencing hooks/session-start, got {commands}",
+        )
 
 
 if __name__ == "__main__":
