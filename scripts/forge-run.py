@@ -14,7 +14,9 @@ Usage:
 
 Exit codes:
     0  every task passed
-    1  contract/usage error (malformed plan, brief-generation failure)
+    1  contract/usage error (malformed plan, brief generation failure,
+       review-packet generation failure, unparseable reviewer verdict,
+       reviewer process crash)
     2  halted on an escalated task
 
 Reuses ``extract-brief.py`` for all plan/spec parsing — no duplicated heading
