@@ -50,7 +50,10 @@ Goal: Codex plan execution moves from in-session subagent dispatch to a determin
 
 ## Halt / escalation
 
-- Runner halts mechanically at the rework cap, on unparseable verdicts, and on brief/packet generation errors (existing fail-loud contracts). Orchestrator relays receipt contents to the user; never absorbs work inline. Resolution (amend brief, re-tier, bump to max, defer) is a human decision before re-invocation.
+- Two halt classes, distinguished by exit code:
+  - **Task escalation (exit 2)** — rework cap hit: receipt written with `outstanding_findings`; orchestrator relays the receipt's contents to the user.
+  - **Contract error (exit 1)** — malformed plan, brief/packet generation failure, unparseable reviewer verdict, reviewer process crash: fails loudly to stderr naming the cause, before meaningful task state exists; no receipt. Orchestrator relays the stderr cause.
+- Either way the runner stops before the next task and never absorbs work inline. Resolution (amend brief, re-tier, bump to max, defer) is a human decision before re-invocation.
 
 ## Retirements / doc changes
 
@@ -80,3 +83,4 @@ Goal: Codex plan execution moves from in-session subagent dispatch to a determin
 
 2026-07-13: `.forge/` ignore is runner-written (self-ignoring `.gitignore`), not target-repo setup — requirement was unowned by any plan task (Task 2 escalation).
 2026-07-13: receipts gain outstanding_findings on escalation (Task 3).
+2026-07-14: Halt section split into two classes — exit 2 task escalation (receipt) vs exit 1 contract error (stderr, no receipt); docs follow code (Task 5 escalation).
