@@ -130,7 +130,7 @@ they can't skip anything the spec requires.
 | `skills/planning` | Spec → plan (what/where, no code) → tiered execution. Codex execution notes in `codex-execution.md`. |
 | `skills/tdd` | Red-green-refactor cut to its operational core. Test-harness creation is plan-level work, never a drive-by. |
 | `skills/project-memory` | Formats and rules for ROADMAP / DECISIONS / DEFERRALS. |
-| `agents/` + `codex/agents/` | The three tier workers, model pinned per harness (Claude: haiku/sonnet/opus; Codex: gpt-5.4-mini/gpt-5.4/gpt-5.5). |
+| `agents/` | The three tier workers (forge-light, forge-standard, forge-deep), model pinned per harness. |
 | `scripts/` | `extract-brief.py` (plan+spec → worker brief), `review-packet.py` (task block + diff → review packet). Stdlib Python. |
 | `hooks/session-start` | Injects ~60 words of flow context, only in repos with `docs/forge/` (or legacy `docs/theforge/`, with a rename nudge). Silent everywhere else. |
 
@@ -156,16 +156,6 @@ codex plugin install forge@forge
 The `SessionStart` hook works on Codex without extra wiring — the shared
 `hooks/hooks.json` schema is compatible and Codex sets `CLAUDE_PLUGIN_ROOT`
 for plugin-hook compatibility.
-
-Then copy the tier agents to your Codex config (they can't ship inside the
-plugin):
-
-```bash
-cp codex/agents/*.toml ~/.codex/agents/
-```
-
-**On plugin update:** re-run the copy command; the `.toml` files are synced
-manually by design.
 
 <details>
 <summary><strong>Known Codex caveats</strong></summary>
