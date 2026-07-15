@@ -60,7 +60,8 @@ class FireNotifyUnitTests(unittest.TestCase):
 
     def test_default_on_darwin_uses_osascript(self):
         calls = []
-        with mock.patch.object(forge_run.sys, "platform", "darwin"), \
+        with mock.patch.dict(os.environ, {"FORGE_NOTIFY_DISABLE": ""}), \
+             mock.patch.object(forge_run.sys, "platform", "darwin"), \
              mock.patch.object(forge_run.subprocess, "Popen",
                                side_effect=lambda argv, **k: calls.append(argv)):
             forge_run.fire_notify("completed", "3 tasks passed", cmd=None)
@@ -71,7 +72,8 @@ class FireNotifyUnitTests(unittest.TestCase):
     def test_default_off_darwin_writes_stderr_and_fires_nothing(self):
         calls = []
         err = mock.MagicMock()
-        with mock.patch.object(forge_run.sys, "platform", "linux"), \
+        with mock.patch.dict(os.environ, {"FORGE_NOTIFY_DISABLE": ""}), \
+             mock.patch.object(forge_run.sys, "platform", "linux"), \
              mock.patch.object(forge_run.sys, "stderr", err), \
              mock.patch.object(forge_run.subprocess, "Popen",
                                side_effect=lambda argv, **k: calls.append(argv)):

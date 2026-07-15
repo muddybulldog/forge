@@ -123,6 +123,10 @@ def fire_notify(event, summary, cmd=None):
     try:
         if cmd:
             argv = shlex.split(cmd) + [event, summary]
+        elif os.environ.get("FORGE_NOTIFY_DISABLE"):
+            # Automated/non-interactive context (the test suite sets this) — never
+            # pop the default desktop modal. An explicit --notify CMD still fires.
+            return
         elif sys.platform == "darwin":
             message = summary.replace('"', "'")
             argv = ["osascript", "-e",
