@@ -59,6 +59,7 @@ import forge_common
 import forge_git
 import forge_plan
 import forge_receipts
+import forge_status
 
 # Re-export the sibling API into this namespace: the runner's own code below
 # calls these by bare name, and tests/docs address them as ``forge_run.<name>``.
@@ -495,6 +496,12 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     overall = "passed"
     escalated = False
 
+    # Incremental run.json: write `running` before the first task so --status/the
+    # hook can distinguish an in-progress run from a dead one, and rewrite after
+    # each passed task so live per-task progress is visible. base_commit rides
+    # along so a resume still reads it.
+    write_run_json(run_dir, plan_path, spec_path, "running", task_summaries, run_base)
+
     # order_tasks yields dependency order (each dependency before its dependents)
     # and the loop breaks on the first escalation, so a dependent is never reached
     # unless every dependency already passed — no separate depends-on guard needed.
@@ -515,10 +522,13 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             continue
 
         _clear_task_receipts(run_dir, task.number)
+        print("task {}: {} — starting".format(task.number, task.title), flush=True)
         outcome = execute_task(
             task, plan_path, spec_path, run_dir, codex_bin, cwd,
             effort_override=effort_overrides.get(task.number), timeout=timeout,
         )
+        print("task {}: {} ({} attempt(s))".format(
+            task.number, outcome.status, outcome.attempts), flush=True)
         summary = {
             "number": task.number,
             "title": task.title,
@@ -535,6 +545,9 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             # Commit this task's slice (ledger annotation included); records the
             # SHA, or None when the task changed nothing (no empty commit).
             summary["commit"] = _git_commit_task(cwd, task)
+            write_run_json(
+                run_dir, plan_path, spec_path, "running", task_summaries, run_base
+            )
         else:
             annotate_ledger(plan_path, task, "escalated: {}".format(outcome.summary))
             overall = "escalated"
@@ -577,8 +590,14 @@ def main(argv=None):
         prog="forge-run.py",
         description="Deterministic whole-plan task runner over `codex exec`.",
     )
-    parser.add_argument("plan", help="approved plan markdown file")
-    parser.add_argument("--spec", required=True, help="design spec markdown file")
+    parser.add_argument("plan", nargs="?", help="approved plan markdown file")
+    parser.add_argument("--spec", help="design spec markdown file")
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="read-only: print the run summary for --run-dir and exit; "
+        "dispatches nothing (plan/--spec not required)",
+    )
     parser.add_argument(
         "--run-dir",
         default=None,
@@ -607,6 +626,21 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
+    # Read-only status mode: print the run summary from run.json + receipts and
+    # exit. Dispatches nothing; plan/--spec are not required.
+    if args.status:
+        if not args.run_dir:
+            parser.error("--status requires --run-dir")
+        state = forge_status.read_run_state(args.run_dir)
+        if state is None:
+            print("no run at {}".format(args.run_dir))
+        else:
+            print(forge_status.render_status(state))
+        return 0
+
+    if not args.plan or not args.spec:
+        parser.error("plan and --spec are required (or use --status --run-dir)")
+
     run_dir = args.run_dir or _default_run_dir()
     try:
         effort_overrides = parse_effort_overrides(args.effort)
@@ -616,6 +650,20 @@ def main(argv=None):
         )
     except RuntimeError as e:
         print("error: {}".format(e), file=sys.stderr)
+        # Persist a contract-error marker when the run dir already exists, so
+        # --status/the hook report it. Errors before the run dir exists (dirty
+        # tree, unparseable plan) leave no run.json — stderr is the only signal.
+        # Preserve any base_commit/tasks already persisted so a later resume is
+        # unaffected (the error may have struck mid-run, after tasks committed).
+        if os.path.isdir(run_dir):
+            try:
+                write_run_json(
+                    run_dir, args.plan, args.spec, "contract-error",
+                    _read_run_tasks(run_dir) or [], _read_base_commit(run_dir),
+                    contract_error=str(e),
+                )
+            except OSError:
+                pass
         return 1
 
 
