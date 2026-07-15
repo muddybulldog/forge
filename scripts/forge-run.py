@@ -559,29 +559,60 @@ def _git_head(cwd):
     return proc.stdout.strip() or None
 
 
-def _snapshot_worktree(cwd):
-    """Per-task review base: a tree-ish capturing the working tree *before* the
-    task runs, so ``git diff <snapshot>`` afterwards shows only this task's own
-    changes. Nothing commits between tasks (HEAD never advances), so a HEAD base
-    would fold every prior task's still-uncommitted change into this task's packet;
-    ``git stash create`` snapshots the current tracked working tree as a dangling
-    commit without touching the working tree, index, or refs. Returns that commit
-    SHA, or HEAD when the tree is clean (``stash create`` emits nothing), or None
-    when ``cwd`` is not a git repo (callers that reach the reviewer raise loudly).
-    Untracked files are invisible to this base, consistent with ``git diff``
-    (DEFERRALS 2026-07-11)."""
-    head = _git_head(cwd)
-    if head is None:
-        return None
+def _working_tree_dirty(cwd):
+    """The working tree's dirty paths (``git status --porcelain`` lines), or ``[]``
+    when clean, or ``None`` when ``cwd`` is not a git repo. The self-ignored
+    ``.forge/`` never appears (its ``*`` gitignore). Commit discipline requires a
+    clean tree at invocation start, so ``run_plan`` halts on a non-empty list."""
     try:
         proc = subprocess.run(
-            ["git", "stash", "create"], cwd=cwd, capture_output=True, text=True
+            ["git", "status", "--porcelain"], cwd=cwd, capture_output=True, text=True
         )
     except OSError:
         return None
     if proc.returncode != 0:
         return None
-    return proc.stdout.strip() or head
+    return [ln for ln in proc.stdout.splitlines() if ln.strip()]
+
+
+def _git_commit_task(cwd, task):
+    """Commit this passed task's work as one slice: ``git add -A`` then
+    ``git commit -m "forge: task <N> — <title>"``. Returns the new HEAD SHA, or
+    ``None`` when nothing was staged (empty ``git diff --cached`` — e.g. a task
+    that changed no files, or a human pre-fixed the work on resume) or ``cwd`` is
+    not a git repo. Never creates an empty commit. ``.forge/`` is ignored, never
+    staged; the ledger annotation (written before this call) rides in the commit."""
+    if _git_head(cwd) is None:
+        return None
+    try:
+        add = subprocess.run(
+            ["git", "add", "-A"], cwd=cwd, capture_output=True, text=True
+        )
+        if add.returncode != 0:
+            raise RuntimeError(
+                "git add -A for task {} failed in {}: {}".format(
+                    task.number, cwd, add.stderr.strip()
+                )
+            )
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"], cwd=cwd,
+            capture_output=True, text=True,
+        )
+        if staged.returncode == 0:
+            return None  # nothing staged -> skip, no empty commit
+        msg = "forge: task {} — {}".format(task.number, task.title)
+        commit = subprocess.run(
+            ["git", "commit", "-m", msg], cwd=cwd, capture_output=True, text=True
+        )
+    except OSError:
+        return None
+    if commit.returncode != 0:
+        raise RuntimeError(
+            "git commit for task {} failed in {}: {}".format(
+                task.number, cwd, commit.stderr.strip()
+            )
+        )
+    return _git_head(cwd)
 
 
 def _git_diff(cwd, base):
@@ -638,12 +669,37 @@ def write_receipt(run_dir, task, attempt, receipt_dict):
     return path
 
 
-def write_run_json(run_dir, plan_path, spec_path, status, task_summaries):
+def _read_base_commit(run_dir):
+    """The ``base_commit`` persisted in an existing ``run.json`` (first-invocation
+    HEAD, the whole-plan final-review diff base), or ``None`` when there is no
+    prior run.json — so a resume reuses the original base rather than a HEAD that
+    has advanced past already-committed tasks."""
+    path = os.path.join(run_dir, "run.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f).get("base_commit")
+    except (OSError, ValueError):
+        return None
+
+
+def _read_run_tasks(run_dir):
+    """The ``tasks`` list from an existing ``run.json`` (used on resume to carry
+    a passed task's recorded commit SHA forward), or ``None`` when absent."""
+    path = os.path.join(run_dir, "run.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f).get("tasks")
+    except (OSError, ValueError):
+        return None
+
+
+def write_run_json(run_dir, plan_path, spec_path, status, task_summaries, base_commit):
     os.makedirs(run_dir, exist_ok=True)
     data = {
         "plan": os.path.abspath(plan_path),
         "spec": os.path.abspath(spec_path),
         "status": status,
+        "base_commit": base_commit,
         "tasks": task_summaries,
     }
     path = os.path.join(run_dir, "run.json")
@@ -774,11 +830,11 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
     model, effort = TIER_MAP[task.tier]
     if effort_override is not None:
         effort = effort_override
-    # Snapshot the working tree before this task runs — the per-task review base.
-    # HEAD does not advance between tasks (nothing commits), so a HEAD base would
-    # include prior tasks' uncommitted changes; the snapshot isolates `git diff`
-    # to this task's own changes. Taken once (trivial tiers need no reviewer).
-    review_base = _snapshot_worktree(cwd) if task.tier != "trivial" else None
+    # Per-task review base = HEAD at task start (the prior task's commit; the
+    # run-start commit for task 1). Each passed task commits, so the tree is clean
+    # here and `git diff <review_base>` isolates this task's own changes. Taken
+    # once (trivial tiers need no reviewer).
+    review_base = _git_head(cwd) if task.tier != "trivial" else None
     findings_carry = []
 
     attempt = 0
@@ -884,6 +940,16 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
     N=LEVEL``) must reference only task numbers present in the plan — an
     unknown number raises naming the cause. ``timeout`` bounds every worker and
     reviewer ``codex exec`` call."""
+    # Clean-tree precondition (every invocation, first run and resume): commit
+    # discipline only yields clean per-task/whole-plan boundaries if the tree
+    # starts clean. Checked before creating the run dir or `.forge/` gitignore so
+    # neither perturbs the check. A non-repo cwd (None) skips the precondition.
+    dirty = _working_tree_dirty(cwd)
+    if dirty:
+        raise RuntimeError(
+            "working tree not clean at run start — commit or discard before "
+            "re-invoking:\n{}".format("\n".join(dirty))
+        )
     os.makedirs(run_dir, exist_ok=True)
     ensure_forge_gitignore(cwd)
     tasks = parse_plan_tasks(plan_path)
@@ -898,7 +964,14 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                 ", ".join(str(t.number) for t in tasks),
             )
         )
-    run_base = _git_head(cwd)  # whole-plan diff base for the final review
+    # Whole-plan final-review diff base: the run-start HEAD, captured once and
+    # persisted in run.json so a resume reuses it rather than a HEAD that has
+    # advanced past already-committed tasks.
+    run_base = _read_base_commit(run_dir) or _git_head(cwd)
+    prior_commits = {
+        t.get("number"): t.get("commit")
+        for t in (_read_run_tasks(run_dir) or [])
+    }
 
     task_summaries = []
     overall = "passed"
@@ -918,6 +991,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
                     "tier": task.tier,
                     "status": "passed",
                     "attempts": prior.get("attempt", 1),
+                    "commit": prior_commits.get(task.number),
                 }
             )
             continue
@@ -927,19 +1001,22 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             task, plan_path, spec_path, run_dir, codex_bin, cwd,
             effort_override=effort_overrides.get(task.number), timeout=timeout,
         )
-        task_summaries.append(
-            {
-                "number": task.number,
-                "title": task.title,
-                "tier": task.tier,
-                "status": outcome.status,
-                "attempts": outcome.attempts,
-            }
-        )
+        summary = {
+            "number": task.number,
+            "title": task.title,
+            "tier": task.tier,
+            "status": outcome.status,
+            "attempts": outcome.attempts,
+            "commit": None,
+        }
+        task_summaries.append(summary)
         if outcome.status == "passed":
             annotate_ledger(
                 plan_path, task, "passed, {} attempt(s)".format(outcome.attempts)
             )
+            # Commit this task's slice (ledger annotation included); records the
+            # SHA, or None when the task changed nothing (no empty commit).
+            summary["commit"] = _git_commit_task(cwd, task)
         else:
             annotate_ledger(plan_path, task, "escalated: {}".format(outcome.summary))
             overall = "escalated"
@@ -958,7 +1035,7 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
             if verdict.kind == "findings":
                 overall = "escalated-final-review"
 
-    write_run_json(run_dir, plan_path, spec_path, overall, task_summaries)
+    write_run_json(run_dir, plan_path, spec_path, overall, task_summaries, run_base)
     return 0 if overall == "passed" else 2
 
 
