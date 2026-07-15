@@ -15,7 +15,7 @@
 - Modify: `scripts/forge-run.py` (add clean-tree precondition, per-task commit, per-task base = prior commit, persisted `base_commit`; retire `_snapshot_worktree`)
 - Test: `tests/test_forge_run.py` (new cases on a real temp git repo)
 
-**Spec:** Commit discipline, Task loop (per task), Receipts, Resume, Halt / escalation
+**Spec:** Commit discipline, Task loop, Receipts, Resume, Halt
 
 **Interface:**
 - `_working_tree_dirty(cwd)` → `list[str] | None`: `git status --porcelain` lines (dirty paths); `[]` when clean; `None` when `cwd` is not a git repo. The self-ignored `.forge/` never appears (its `*` gitignore).
