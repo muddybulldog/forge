@@ -12,7 +12,7 @@
 **Global Constraints:** Runner modules stay stdlib-only. `rich` is a monitor-only dependency — `forge-monitor.py` guards the import and exits with an install hint if absent. The tee must not change any existing behavior: worker/acceptance/reviewer exit codes, output tails, `--output-last-message` capture, and timeout kills are identical to today. New `run.json` fields are additive and optional (a runner that omits them, and an old run.json without them, both still parse). Timestamps are UTC ISO-8601. Phase-header strings in the live log are a contract shared by runner and monitor: `── worker · codex exec · <model> · <effort> ──`, `── acceptance ──`, `── review · codex exec · <model> · <effort> ──`.
 
 ### Task 1: Tee helper
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_common.py` (add `TeeResult` dataclass + `run_teed` helper)
