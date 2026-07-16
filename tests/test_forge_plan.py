@@ -13,6 +13,19 @@ import unittest
 from _forge_support import *  # noqa: F401,F403
 
 
+# Local variants of the shared trivial-tier fixtures, carrying the
+# justification the new contract requires for an off-floor (non-standard)
+# tier. Kept local to this file (rather than editing the shared
+# _forge_support.py fixtures used by other test modules) to stay within this
+# task's file scope.
+PLAN_DEPS_JUSTIFIED = PLAN_DEPS.replace(
+    "**Tier:** trivial", "**Tier:** trivial — mechanical, single call site"
+)
+PLAN_PASS_JUSTIFIED = PLAN_PASS.replace(
+    "**Tier:** trivial", "**Tier:** trivial — mechanical, single call site"
+)
+
+
 class ParsePlanTasksTests(unittest.TestCase):
     def _write(self, content):
         d = tempfile.mkdtemp(prefix="forge-run-parse-")
@@ -23,7 +36,7 @@ class ParsePlanTasksTests(unittest.TestCase):
         return p
 
     def test_parses_number_title_tier_depends_acceptance(self):
-        tasks = forge_run.parse_plan_tasks(self._write(PLAN_DEPS))
+        tasks = forge_run.parse_plan_tasks(self._write(PLAN_DEPS_JUSTIFIED))
         by_num = {t.number: t for t in tasks}
         self.assertEqual(set(by_num), {1, 2})
         self.assertEqual(by_num[1].title, "First task")
@@ -33,7 +46,7 @@ class ParsePlanTasksTests(unittest.TestCase):
         self.assertEqual(by_num[2].depends_on, [1])
 
     def test_checkbox_line_points_at_done_line(self):
-        p = self._write(PLAN_PASS)
+        p = self._write(PLAN_PASS_JUSTIFIED)
         tasks = forge_run.parse_plan_tasks(p)
         with open(p) as f:
             lines = f.read().splitlines()
@@ -52,6 +65,78 @@ class ParsePlanTasksTests(unittest.TestCase):
             forge_run.parse_plan_tasks(self._write(PLAN_DUP))
         self.assertIn("1", str(ctx.exception))
         self.assertIn("duplicate", str(ctx.exception).lower())
+
+
+class TierJustificationTests(unittest.TestCase):
+    """Tier: field parses as <level>[ -- <justification>], split on the em
+    dash. standard ignores/clears any justification; complex/trivial require a
+    non-empty one, else RuntimeError naming the task. Presence only -- never
+    justification quality (Classification contract, Enforcement)."""
+
+    def _write(self, content):
+        d = tempfile.mkdtemp(prefix="forge-run-tier-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        p = os.path.join(d, "plan.md")
+        with open(p, "w") as f:
+            f.write(content)
+        return p
+
+    def _plan(self, tier_line):
+        return (
+            "# Fixture Plan\n\n"
+            "**Goal:** Do the thing.\n\n"
+            "### Task 1: First task\n"
+            "- [ ] Done\n\n"
+            "**Acceptance:** `true`\n\n"
+            "**Tier:** {}\n\n"
+            "**Depends on:** nothing\n"
+        ).format(tier_line)
+
+    def test_complex_with_justification_parses_level_and_justification(self):
+        p = self._write(
+            self._plan("complex — reconciles two retry semantics")
+        )
+        tasks = forge_run.parse_plan_tasks(p)
+        self.assertEqual(tasks[0].tier, "complex")
+        self.assertEqual(
+            tasks[0].tier_justification, "reconciles two retry semantics"
+        )
+
+    def test_bare_standard_parses_with_no_justification(self):
+        p = self._write(self._plan("standard"))
+        tasks = forge_run.parse_plan_tasks(p)
+        self.assertEqual(tasks[0].tier, "standard")
+        self.assertIsNone(tasks[0].tier_justification)
+
+    def test_bare_complex_raises_naming_task(self):
+        p = self._write(self._plan("complex"))
+        with self.assertRaises(RuntimeError) as ctx:
+            forge_run.parse_plan_tasks(p)
+        msg = str(ctx.exception)
+        self.assertIn("1", msg)
+        self.assertIn("justification", msg.lower())
+
+    def test_trivial_without_justification_raises(self):
+        p = self._write(self._plan("trivial"))
+        with self.assertRaises(RuntimeError) as ctx:
+            forge_run.parse_plan_tasks(p)
+        msg = str(ctx.exception)
+        self.assertIn("1", msg)
+        self.assertIn("justification", msg.lower())
+
+    def test_standard_with_trailing_text_stores_none(self):
+        p = self._write(self._plan("standard — anything"))
+        tasks = forge_run.parse_plan_tasks(p)
+        self.assertEqual(tasks[0].tier, "standard")
+        self.assertIsNone(tasks[0].tier_justification)
+
+    def test_unknown_level_still_raises_existing_error(self):
+        p = self._write(self._plan("bogus — with justification"))
+        with self.assertRaises(RuntimeError) as ctx:
+            forge_run.parse_plan_tasks(p)
+        msg = str(ctx.exception)
+        self.assertIn("bogus", msg)
+        self.assertIn("1", msg)
 
 
 class ParseEffortOverridesTests(unittest.TestCase):

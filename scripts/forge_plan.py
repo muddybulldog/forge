@@ -102,15 +102,30 @@ def parse_plan_tasks(plan_path):
         block_lines = block.splitlines()
         block_mask = eb.fence_mask(block_lines)
 
-        tier = _field_value(block_lines, block_mask, "Tier")
-        if tier is None:
+        tier_raw = _field_value(block_lines, block_mask, "Tier")
+        if tier_raw is None:
             raise RuntimeError("task {} is missing the **Tier:** line".format(num))
-        tier = tier.strip().lower()
+        if "—" in tier_raw:
+            level_part, justification_part = tier_raw.split("—", 1)
+            tier = level_part.strip().lower()
+            tier_justification = justification_part.strip() or None
+        else:
+            tier = tier_raw.strip().lower()
+            tier_justification = None
         if tier not in TIER_MAP:
             raise RuntimeError(
                 "task {} has unknown tier {!r} — expected one of {}".format(
                     num, tier, ", ".join(sorted(TIER_MAP))
                 )
+            )
+        if tier == "standard":
+            # Floor tier takes no justification; any trailing text is ignored.
+            tier_justification = None
+        elif not tier_justification:
+            raise RuntimeError(
+                "task {} tier {!r} is missing a justification — {} tier "
+                "requires one after '— <justification>' (contract "
+                "requirement)".format(num, tier, tier)
             )
 
         depends_on = _parse_depends(_field_value(block_lines, block_mask, "Depends on") or "")
@@ -129,6 +144,7 @@ def parse_plan_tasks(plan_path):
                 number=num,
                 title=title,
                 tier=tier,
+                tier_justification=tier_justification,
                 depends_on=depends_on,
                 acceptance_commands=acceptance,
                 checkbox_line=checkbox_line,
