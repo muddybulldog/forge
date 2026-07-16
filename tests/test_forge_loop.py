@@ -69,7 +69,7 @@ class LoopSubprocessTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "passed")
         self.assertEqual(receipt["tier"], "trivial")
         self.assertEqual(receipt["model"], "gpt-5.6-luna")
-        self.assertEqual(receipt["effort"], "medium")
+        self.assertEqual(receipt["effort"], "low")
         import hashlib
         with open(receipt["brief_path"], "rb") as f:
             actual = hashlib.sha256(f.read()).hexdigest()
@@ -328,7 +328,7 @@ class EffortOverrideCliTests(unittest.TestCase):
         self.assertIsNotNone(t1)
         self.assertIsNotNone(t2)
         self.assertIn("model_reasoning_effort=max", t1)
-        self.assertIn("model_reasoning_effort=medium", t2)  # trivial default, unaffected
+        self.assertIn("model_reasoning_effort=low", t2)  # trivial default, unaffected by the override
 
     def test_ultra_effort_rejected_cli_exits_one_naming_cause(self):
         plan = self._plan(PLAN_PASS)

@@ -92,7 +92,7 @@ PLAN_PASS = """# Fixture Plan
 
 **Acceptance:** `true`
 
-**Tier:** trivial
+**Tier:** trivial — test fixture, mechanical
 
 **Depends on:** nothing
 """
@@ -108,7 +108,7 @@ PLAN_DEPS = """# Fixture Plan
 
 **Acceptance:** `true`
 
-**Tier:** trivial
+**Tier:** trivial — test fixture, mechanical
 
 **Depends on:** Task 1
 
@@ -117,7 +117,7 @@ PLAN_DEPS = """# Fixture Plan
 
 **Acceptance:** `true`
 
-**Tier:** trivial
+**Tier:** trivial — test fixture, mechanical
 
 **Depends on:** nothing
 """
@@ -131,7 +131,7 @@ PLAN_ACC_FAIL = """# Fixture Plan
 
 **Acceptance:** `false`
 
-**Tier:** trivial
+**Tier:** trivial — test fixture, mechanical
 
 **Depends on:** nothing
 """
@@ -145,7 +145,7 @@ PLAN_BAD_HEADING = """# Fixture Plan
 
 **Acceptance:** `true`
 
-**Tier:** trivial
+**Tier:** trivial — test fixture, mechanical
 
 **Depends on:** nothing
 """
@@ -159,7 +159,7 @@ PLAN_DUP = """# Fixture Plan
 
 **Acceptance:** `true`
 
-**Tier:** trivial
+**Tier:** trivial — test fixture, mechanical
 
 **Depends on:** nothing
 
@@ -168,7 +168,7 @@ PLAN_DUP = """# Fixture Plan
 
 **Acceptance:** `true`
 
-**Tier:** trivial
+**Tier:** trivial — test fixture, mechanical
 
 **Depends on:** nothing
 """
@@ -210,7 +210,7 @@ PLAN_STD_THEN_TRIVIAL = """# Fixture Plan
 
 **Acceptance:** `true`
 
-**Tier:** trivial
+**Tier:** trivial — test fixture, mechanical
 
 **Depends on:** Task 1
 """
@@ -268,7 +268,7 @@ PLAN_COMMIT_ONE = """# Fixture Plan
 
 **Acceptance:** `echo ONEMARK >> f1.txt`
 
-**Tier:** trivial
+**Tier:** trivial — test fixture, mechanical
 
 **Depends on:** nothing
 """
@@ -283,7 +283,7 @@ PLAN_COMMIT_TWO = """# Fixture Plan
 
 **Acceptance:** `echo ONEMARK >> f1.txt`
 
-**Tier:** trivial
+**Tier:** trivial — test fixture, mechanical
 
 **Depends on:** nothing
 
@@ -292,7 +292,7 @@ PLAN_COMMIT_TWO = """# Fixture Plan
 
 **Acceptance:** `echo TWOMARK >> f2.txt`
 
-**Tier:** trivial
+**Tier:** trivial — test fixture, mechanical
 
 **Depends on:** Task 1
 """
@@ -325,7 +325,7 @@ PLAN_COMMIT_ONE_THEN_STD = """# Fixture Plan
 
 **Acceptance:** `echo ONEMARK >> f1.txt`
 
-**Tier:** trivial
+**Tier:** trivial — test fixture, mechanical
 
 **Depends on:** nothing
 
@@ -350,7 +350,7 @@ PLAN_COMMIT_NOOP = """# Fixture Plan
 
 **Acceptance:** `true`
 
-**Tier:** trivial
+**Tier:** trivial — test fixture, mechanical
 
 **Depends on:** nothing
 """

@@ -29,7 +29,7 @@ Goal: Codex plan execution moves from in-session subagent dispatch to a determin
 1. Generate brief via `extract-brief.py`; record SHA-256.
 2. Dispatch worker: `codex exec` with tier-pinned model/effort; prompt = worker contract preamble + brief. Contract text sourced from the corresponding `agents/*.md` body — single source for both harnesses; `codex/agents/*.toml` retired.
 3. Run the task's acceptance commands (runner executes them directly). Failure → rework iteration.
-4. Trivial tier: acceptance commands are the whole verification. Standard/complex: generate review packet via `review-packet.py`, dispatch reviewer via `codex exec` (standard → terra/high; complex and final review → sol/high).
+4. Trivial tier: acceptance commands are the whole verification. Standard/complex: generate review packet via `review-packet.py`, dispatch reviewer via `codex exec` routed at the task's own tier via `TIER_MAP` (standard → terra/medium, complex → sol/medium) — fresh context, no strength premium. Per-tier model/effort superseded by `2026-07-16-tier-policy-recalibration-design.md`.
 5. Reviewer verdict contract: reviewer's final message is JSON, captured via `--output-last-message`:
    ```json
    {"verdict": "pass"}
@@ -38,7 +38,7 @@ Goal: Codex plan execution moves from in-session subagent dispatch to a determin
    Unparseable verdict → loud runner failure naming the cause. Never guessed at, never retried silently.
 6. Findings → re-dispatch worker with findings appended to the brief. Rework cap: 2 iterations, enforced by loop counter. Worker crash / timeout / non-zero exit = a failed iteration, same path.
 7. Cap hit → status `escalated`: write receipt with outstanding findings, do not start the next task, exit non-zero.
-8. After the last task passes: final broad review, one `codex exec` sol/high call against whole-plan diff + spec. Diff base is the persisted `base_commit` (see Commit discipline).
+8. After the last task passes: final broad review, one `codex exec` call at the plan's **highest task tier** (`TIER_MAP`) against whole-plan diff + spec — fresh context. Diff base is the persisted `base_commit` (see Commit discipline).
 
 ## Commit discipline
 
