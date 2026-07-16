@@ -15,9 +15,9 @@ Goal: Codex plan execution moves from in-session subagent dispatch to a determin
 
 | Tier | model | model_reasoning_effort |
 |---|---|---|
-| trivial | gpt-5.6-luna | medium |
-| standard | gpt-5.6-terra | high |
-| complex | gpt-5.6-sol | high |
+| trivial | gpt-5.6-luna | low |
+| standard | gpt-5.6-terra | medium |
+| complex | gpt-5.6-sol | medium |
 
 - Passed per worker as `codex exec -m <model> -c model_reasoning_effort=<effort>` — pinned per process.
 - `ultra` effort is prohibited at every tier: it spawns subagents inside the worker, breaking brief isolation and reintroducing child-thread accumulation.
@@ -117,3 +117,4 @@ Codex-only. Purpose: when the runner halts and needs human input, the human is t
 2026-07-15 (phase 6): `--notify` gains a per-task `task-passed` event (modal per task, alongside `escalated`/`contract-error`/`completed`) so a backgrounded run pings on each task completion, not only at the end — operator preference for hands-free progress.
 2026-07-15 (phase 6): UserPromptSubmit hook wiring moved from a manual `~/.codex` install to the shared `hooks/hooks.json` (auto-installed on both harnesses like `session-start`, resolves to the running install's own copy — no stale-path drift). Kept Codex-only-in-effect by a best-effort in-hook harness gate: silent under Claude (input carries `transcript_path`), fires under Codex (`turn_id`), fires when ambiguous (harmless — already silent without an active run). Eliminates the manual install step.
 2026-07-15 (phase 6): **Push machinery removed** — `--notify`/`fire_notify` and the `UserPromptSubmit` hook (script + shared-`hooks.json` wiring + `forge_status.render_hook_block`) deleted. Live Codex testing showed the push path was the wrong model: `osascript` is blocked inside the Codex sandbox (modals never fired), and the hook errored (`exit 127`) on Codex. Session awareness is now **foreground execution** — the orchestrator runs the runner in the foreground and relays the halt into the conversation on non-zero exit; `--timeout` is the hang backstop; `--status` + incremental `run.json` remain for on-demand peeks. Simpler, and it closes the actual need (a halt is visible in the session window) without fighting the sandbox.
+2026-07-16: Tier-mapping recalibrated — trivial/standard/complex efforts lowered from medium/high/high to low/medium/medium respectively, collapsing reviewer routing to task-tier fresh-context; see `2026-07-16-tier-policy-recalibration-design.md` for rationale and implementation.
