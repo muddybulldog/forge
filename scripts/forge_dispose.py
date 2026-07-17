@@ -15,14 +15,20 @@ instance and ``Finding``/``Verdict`` keep a single class identity across
 forge-run.py and this module — the same discipline forge_git/forge_plan/
 forge_receipts follow (DECISIONS 2026-07-14).
 """
+import argparse
 import json
+import os
 import re
+import subprocess
+import sys
 from dataclasses import dataclass, field
 
 from forge_common import (
+    AUTOFIX_MODES,
     MAX_ATTEMPTS_BACKSTOP,
     Finding,
     Verdict,
+    finding_to_dict,
 )
 
 
@@ -238,6 +244,27 @@ class ConvergenceState:
     carried_ids: set = field(default_factory=set)
     prev_acceptance_ok: bool | None = None
 
+    def to_dict(self):
+        """Serialize for the CLI's ``--state`` round-trip (sets -> sorted lists,
+        for a stable/diffable JSON file)."""
+        return {
+            "resolved_ids": sorted(self.resolved_ids),
+            "carried_ids": sorted(self.carried_ids),
+            "prev_acceptance_ok": self.prev_acceptance_ok,
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        """Deserialize a prior ``--state`` file (lists -> sets). ``None``/``{}``
+        yields a fresh state — the CLI's attempt-1 case, before any state file
+        exists."""
+        d = d or {}
+        return cls(
+            resolved_ids=set(d.get("resolved_ids") or []),
+            carried_ids=set(d.get("carried_ids") or []),
+            prev_acceptance_ok=d.get("prev_acceptance_ok"),
+        )
+
 
 def _canon(finding):
     """Canonical identity for cross-attempt matching: the original finding id,
@@ -330,3 +357,156 @@ def advance_state(state, findings, acceptance_ok):
     state.resolved_ids |= (state.carried_ids - real_fix)
     state.carried_ids = real_fix
     state.prev_acceptance_ok = acceptance_ok
+
+
+# --- CLI ---------------------------------------------------------------------
+
+
+def execution_failure_finding(detail):
+    """An execution failure (worker crash/timeout, acceptance non-zero) as an
+    implicit fix-retry finding: disposition ``fix`` so the attempt cannot converge
+    to pass, but no provenance/impact so it never defers, scope-halts, or counts as
+    a carried (stuck) review finding — only the regression (green->red) and
+    backstop rules apply (Rework loop & convergence). ``detail`` is the reattempt
+    guidance surfaced as the outstanding finding. Mirrors forge-run.py's own
+    ``_execution_failure_finding`` (same shape, same contract) — the CLI's
+    ``--execution-failure`` path bypasses classify_findings entirely, exactly as
+    the runner's in-process call does."""
+    return Finding(
+        id="exec-failure", summary=detail, file=None, lines=None,
+        provenance=None, impact=None, disposition="fix",
+    )
+
+
+def _run_git_diff(base):
+    """``git diff <base>`` in the caller's cwd — the CLI computes its own
+    authoritative diff (never trusts a caller-supplied diff), exactly as
+    classify_findings/verify_provenance require. Fails loud naming the cause on
+    a bad ref or a git invocation failure (DECISIONS 2026-07-11)."""
+    try:
+        result = subprocess.run(
+            ["git", "diff", base], capture_output=True, text=True
+        )
+    except OSError as e:
+        raise RuntimeError("failed to invoke git: {}".format(e))
+    if result.returncode != 0:
+        raise RuntimeError(
+            "git diff {} failed: {}".format(base, result.stderr.strip())
+        )
+    return result.stdout
+
+
+def _findings_by_disposition(findings):
+    """Group classified findings by disposition for decision.json, each
+    serialized via forge_common.finding_to_dict — the same wire shape the
+    reviewer emits and the runner already persists to receipts/run.json."""
+    grouped = {"fix": [], "defer": [], "halt": []}
+    for f in findings:
+        grouped.setdefault(f.disposition, []).append(finding_to_dict(f))
+    return grouped
+
+
+def _build_decision(action, halt_reason, findings, state):
+    return {
+        "action": action,
+        "halt_reason": halt_reason,
+        "findings": _findings_by_disposition(findings),
+        "state": state.to_dict(),
+    }
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="forge_dispose.py")
+    parser.add_argument(
+        "--verdict", default=None,
+        help="path to the reviewer's verdict JSON; required unless "
+             "--execution-failure is set",
+    )
+    parser.add_argument(
+        "--base", required=True,
+        help="diff base: the task's prior commit, or run-start HEAD for the "
+             "final review",
+    )
+    parser.add_argument(
+        "--state", default=None,
+        help="path to the prior ConvergenceState JSON; omitted/absent means a "
+             "fresh state (attempt 1)",
+    )
+    parser.add_argument("--attempt", type=int, required=True)
+    parser.add_argument("--acceptance-ok", required=True, choices=["true", "false"])
+    parser.add_argument("--autofix", required=True, choices=list(AUTOFIX_MODES))
+    parser.add_argument(
+        "--execution-failure", action="store_true",
+        help="synthesize the implicit fix-retry finding for a worker crash/"
+             "timeout/acceptance failure instead of reading --verdict",
+    )
+    parser.add_argument(
+        "--execution-detail", default="execution failure",
+        help="reattempt guidance surfaced as the execution-failure finding's "
+             "summary",
+    )
+    args = parser.parse_args(argv)
+
+    if args.execution_failure and args.verdict:
+        print(
+            "error: --verdict and --execution-failure are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 1
+    if not args.execution_failure and not args.verdict:
+        print(
+            "error: --verdict is required unless --execution-failure is set",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.state and os.path.exists(args.state):
+        try:
+            with open(args.state, "r", encoding="utf-8") as f:
+                state = ConvergenceState.from_dict(json.load(f))
+        except (OSError, json.JSONDecodeError) as e:
+            print(
+                "error: cannot read state file {}: {}".format(args.state, e),
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        state = ConvergenceState()
+
+    acceptance_ok = args.acceptance_ok == "true"
+
+    try:
+        if args.execution_failure:
+            findings = [execution_failure_finding(args.execution_detail)]
+        else:
+            try:
+                with open(args.verdict, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+            except (OSError, json.JSONDecodeError) as e:
+                print(
+                    "error: cannot read verdict file {}: {}".format(
+                        args.verdict, e
+                    ),
+                    file=sys.stderr,
+                )
+                return 1
+            verdict = _verdict_from_obj(raw)
+            if verdict.kind == "findings":
+                diff_text = _run_git_diff(args.base)
+                verdict = classify_findings(verdict, diff_text)
+            findings = verdict.findings
+    except RuntimeError as e:
+        print("error: {}".format(e), file=sys.stderr)
+        return 1
+
+    action, halt_reason = convergence_decision(
+        findings, state, acceptance_ok, args.attempt, args.autofix
+    )
+    advance_state(state, findings, acceptance_ok)
+
+    print(json.dumps(_build_decision(action, halt_reason, findings, state)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
