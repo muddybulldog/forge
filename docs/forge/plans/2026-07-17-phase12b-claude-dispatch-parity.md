@@ -21,7 +21,7 @@
 - `docs/forge/DEFERRALS.md`, `docs/forge/ROADMAP.md`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json` (modify) — resolve DEFERRALS 2026-07-13, mark Phase 12b done, lockstep 0.8.0 bump.
 
 ### Task 1: Extract decision logic into forge_dispose.py
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Create: `scripts/forge_dispose.py`
@@ -41,7 +41,7 @@
 **Depends on:** nothing.
 
 ### Task 2: forge_dispose CLI + ConvergenceState JSON round-trip
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_dispose.py` (add `ConvergenceState.to_dict`/`from_dict`, `main()`/argparse, diff computation, `decision.json` assembly)
@@ -63,7 +63,7 @@
 **Depends on:** Task 1.
 
 ### Task 3: SKILL.md dispatch-branch rewrite
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `skills/planning/SKILL.md` (Execution section — Claude dispatch sub-bullet, rework-guardrails, proportional-review, final-review dispatch prose)
@@ -81,7 +81,7 @@
 **Depends on:** Task 2.
 
 ### Task 4: README serial-by-design note
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `README.md`
@@ -99,7 +99,7 @@
 **Depends on:** Task 3.
 
 ### Task 5: Bookkeeping — changelog pointers, resolve deferral, roadmap, 0.8.0 bump
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `skills/planning/codex-execution.md` (changelog pointer: decision logic now in shared `forge_dispose.py`)
