@@ -172,7 +172,7 @@ Reuses convergence_decision + classify_findings; diff base = run-start HEAD; tie
 **Depends on:** Task 1.
 
 ### Task 6: Receipts and run.json fields
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_receipts.py` (write_run_json gains deferrals/autofix_mode/doc_sync; write_final_review_receipt carries classified findings via finding_to_dict)
