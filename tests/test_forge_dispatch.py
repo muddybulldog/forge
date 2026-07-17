@@ -137,6 +137,10 @@ class TimeoutTests(unittest.TestCase):
         )
 
     def test_worker_timeout_counts_as_failed_iteration_then_escalates(self):
+        # A worker timeout is an execution failure -> implicit fix-retry finding:
+        # it reworks every attempt (never scope-halts) until the backstop
+        # (MAX_ATTEMPTS_BACKSTOP == 5), then escalates with the timeout as the
+        # outstanding finding.
         plan = self._plan(PLAN_PASS)  # trivial, no reviewer, no git repo needed
         res = self._run(
             plan,
@@ -144,9 +148,10 @@ class TimeoutTests(unittest.TestCase):
             responses=[{"exit": 0, "msg": "", "sleep": 2}],
         )
         self.assertEqual(res.returncode, 2, res.stderr)
-        with open(os.path.join(self.run_dir, "task-1-attempt-2.json")) as f:
+        with open(os.path.join(self.run_dir, "task-1-attempt-5.json")) as f:
             receipt = json.load(f)
         self.assertEqual(receipt["status"], "escalated")
+        self.assertEqual(receipt["halt_reason"], "backstop")
         self.assertTrue(
             any("timed out" in f_ for f_ in receipt["outstanding_findings"])
         )

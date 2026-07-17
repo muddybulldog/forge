@@ -41,7 +41,7 @@ import json
 import os
 import re
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -78,6 +78,7 @@ from forge_common import (  # noqa: F401
     Verdict,
     WorkerResult,
     eb,
+    finding_to_dict,
     rp,
     run_teed,
     verdict_to_dict,
@@ -392,6 +393,120 @@ def classify_findings(verdict, diff_text):
     return verdict
 
 
+# --- convergence: the pass/rework/halt decision + cross-attempt state -------
+
+
+@dataclass
+class ConvergenceState:
+    """The runner's authoritative view across a task's attempts. ``resolved_ids``
+    are the canonical finding ids the runner has recorded as resolved (a prior
+    fix finding that later disappeared); ``carried_ids`` is the set of fix-finding
+    canonical ids still outstanding as of the prior *reviewed* attempt — a fix id
+    present in two consecutive reviewed attempts with nothing resolved between them
+    is *stuck* (membership is all the stuck rule needs; the exact per-finding
+    appearance count is not); ``prev_acceptance_ok`` is the prior attempt's
+    acceptance result (for the green->red regression check). An execution-failure
+    attempt yields no review signal, so it advances only ``prev_acceptance_ok`` and
+    leaves both id sets untouched."""
+
+    resolved_ids: set = field(default_factory=set)
+    carried_ids: set = field(default_factory=set)
+    prev_acceptance_ok: bool | None = None
+
+
+def _canon(finding):
+    """Canonical identity for cross-attempt matching: the original finding id,
+    following ``carried_from`` when the reviewer re-issued the same issue under a
+    new id. The runner matches by this — never by the reviewer's self-labeling —
+    so a mislabeled reappearance is still caught."""
+    return finding.carried_from or finding.id
+
+
+def _real_fix_canons(findings):
+    """Canonical ids of the reviewer's fix-disposition findings. The implicit
+    execution-failure finding (no impact) carries no identity, so it never enters
+    the resolved-id or carried-fix set — it is subject only to the regression
+    (green->red) and backstop rules, never stuck/scope-halt."""
+    return {
+        _canon(f) for f in findings
+        if f.disposition == "fix" and f.impact is not None
+    }
+
+
+def _is_execution_failure(findings):
+    """True when this attempt is the synthesized execution-failure retry (worker
+    crash/timeout, acceptance non-zero) rather than reviewer output. Its marker is
+    the only ``fix``-disposition finding with no impact — a real reviewer fix is
+    always contract-breaking (derive_disposition), so this test is unambiguous.
+    Such an attempt produced no review signal, so it must leave the authoritative
+    resolved-id and carried-fix sets untouched (Rework loop & convergence: an
+    execution failure is subject only to the regression and backstop rules)."""
+    return any(f.disposition == "fix" and f.impact is None for f in findings)
+
+
+def convergence_decision(findings, state, acceptance_ok, attempt, autofix_mode,
+                         backstop=MAX_ATTEMPTS_BACKSTOP):
+    """Decide one attempt deterministically from the classified findings, the
+    running state, acceptance, the attempt count, and the autofix mode. Returns
+    ``(action, halt_reason)`` with ``action`` in {"pass", "rework", "halt"} and a
+    halt reason (one of HALT_REASONS) only when halting. Precedence (Rework loop &
+    convergence spec):
+
+    1. ``gate`` mode + any reviewer finding -> halt/``gate`` (a transient
+       execution failure is exempt: it carries no impact).
+    2. any halt-disposition finding (pre-existing x contract-breaking) ->
+       halt/``scope-decision``.
+    3. regression -> halt/``regression``: a runner-recorded resolved id reappears,
+       or acceptance went green->red since the prior attempt.
+    4. stuck -> halt/``stuck``: a fix finding persists across two consecutive
+       attempts with nothing resolved this round (net progress is otherwise not
+       required — a round may resolve one finding and surface another).
+    5. no fix findings remain and acceptance is green -> ``pass``.
+    6. attempt count reaches the backstop -> halt/``backstop`` (a seatbelt against
+       slow non-convergence, not a target cap); otherwise -> ``rework``.
+    """
+    if autofix_mode == "gate" and any(f.impact is not None for f in findings):
+        return ("halt", "gate")
+    if any(f.disposition == "halt" for f in findings):
+        return ("halt", "scope-decision")
+    reappeared = any(_canon(f) in state.resolved_ids for f in findings)
+    green_to_red = state.prev_acceptance_ok is True and not acceptance_ok
+    if reappeared or green_to_red:
+        return ("halt", "regression")
+    real_fix = _real_fix_canons(findings)
+    prior_fix = state.carried_ids
+    carried = real_fix & prior_fix
+    resolved_this_round = prior_fix - real_fix
+    if carried and not resolved_this_round:
+        return ("halt", "stuck")
+    if not any(f.disposition == "fix" for f in findings) and acceptance_ok:
+        return ("pass", None)
+    if attempt >= backstop:
+        return ("halt", "backstop")
+    return ("rework", None)
+
+
+def advance_state(state, findings, acceptance_ok):
+    """Fold one attempt's classified findings into the convergence state for the
+    next attempt. An **execution-failure** attempt (worker crash/timeout,
+    acceptance non-zero) produced no review signal, so it leaves *both* id sets
+    exactly as the prior reviewed attempt left them — a crash neither resolves nor
+    re-carries a reviewer finding — and advances only the acceptance result (the
+    one input the green->red regression rule still needs). A **reviewed** attempt
+    records fix findings that disappeared (outstanding before, gone now) into the
+    authoritative resolved-id set and replaces the carried-fix set with this
+    attempt's outstanding fix ids. Only reviewer fix findings carry identity (see
+    _real_fix_canons); this attempt's acceptance result is always stored for the
+    next green->red check."""
+    if _is_execution_failure(findings):
+        state.prev_acceptance_ok = acceptance_ok
+        return
+    real_fix = _real_fix_canons(findings)
+    state.resolved_ids |= (state.carried_ids - real_fix)
+    state.carried_ids = real_fix
+    state.prev_acceptance_ok = acceptance_ok
+
+
 def _dispatch_review_call(model, effort, preamble, packet_path, codex_bin, last_msg_path,
                            live_path, header, timeout=DEFAULT_TIMEOUT):
     """Shared plumbing for per-task and final reviewers: one ``codex exec`` call,
@@ -499,16 +614,33 @@ def _brief_for(task, plan_path, spec_path, run_dir, attempt, findings):
     return brief_path, sha
 
 
+def _execution_failure_finding(detail):
+    """An execution failure (worker crash/timeout, acceptance non-zero) as an
+    implicit fix-retry finding: disposition ``fix`` so the attempt cannot converge
+    to pass, but no provenance/impact so it never defers, scope-halts, or counts as
+    a carried (stuck) review finding — only the regression (green->red) and
+    backstop rules apply (Rework loop & convergence). ``detail`` is the reattempt
+    guidance appended to the next brief and surfaced as the outstanding finding."""
+    return Finding(
+        id="exec-failure", summary=detail, file=None, lines=None,
+        provenance=None, impact=None, disposition="fix",
+    )
+
+
 def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
-                  effort_override=None, timeout=DEFAULT_TIMEOUT):
-    """Run one task through the rework loop: worker -> acceptance -> (standard/
-    complex) reviewer, capped at MAX_ATTEMPTS_BACKSTOP. A worker crash, a
-    worker timeout, a failed acceptance command, or a findings verdict is a
-    failed iteration; the next iteration re-dispatches the worker with the
-    outstanding findings appended to the brief. Hitting the cap yields status
-    ``escalated`` with the outstanding findings on the final receipt.
-    ``effort_override`` (from a per-task ``--effort N=LEVEL`` CLI flag)
-    replaces only this task's worker effort, never the reviewer's."""
+                  effort_override=None, timeout=DEFAULT_TIMEOUT, autofix_mode="auto"):
+    """Run one task through the convergence rework loop: worker -> acceptance ->
+    (standard/complex) reviewer -> classify -> convergence_decision, backed by a
+    per-task ConvergenceState. Each attempt yields ``pass`` (done), ``rework``
+    (re-dispatch the worker with the outstanding fix findings appended to the
+    brief and carried into the re-review packet), or ``halt`` (escalate with a
+    halt reason + any drafted repair task). An execution failure (worker
+    crash/timeout, acceptance non-zero) preempts the reviewer and is treated as an
+    implicit fix-retry finding — never defers or scope-halts, but counts for
+    regression (green->red) and the backstop. ``autofix_mode`` ``gate``
+    short-circuits any reviewer finding to a halt. ``effort_override`` (from a
+    per-task ``--effort N=LEVEL`` CLI flag) replaces only this task's worker
+    effort, never the reviewer's."""
     model, effort = TIER_MAP[task.tier]
     if effort_override is not None:
         effort = effort_override
@@ -517,7 +649,9 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
     # here and `git diff <review_base>` isolates this task's own changes. Taken
     # once (trivial tiers need no reviewer).
     review_base = _git_head(cwd) if task.tier != "trivial" else None
-    findings_carry = []
+    state = ConvergenceState()
+    findings_carry = []     # outstanding fix-finding summaries -> next brief
+    prior_findings = []     # outstanding fix findings (dicts) -> next re-review packet
     live_path = os.path.join(run_dir, "task-{}-live.log".format(task.number))
 
     attempt = 0
@@ -538,59 +672,56 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
         acc_ok = all(r.exit_code == 0 for r in acceptance)
 
         review_verdict = None
-        iteration_findings = []
-        failure_summary = None
+        findings = []       # classified Finding objects for this attempt
+        cause = None        # short human-readable cause for an execution failure
 
         if worker.timed_out:
-            failure_summary = "worker timed out after {}s".format(timeout)
-            iteration_findings = [
-                "Prior worker attempt timed out after {}s with no usable "
-                "result — reattempt the task.".format(timeout)
-            ]
+            cause = "worker timed out after {}s".format(timeout)
+            findings = [_execution_failure_finding(
+                "Prior worker attempt timed out after {}s with no usable result — "
+                "reattempt the task.".format(timeout))]
         elif not worker_ok:
-            failure_summary = "worker exited {}".format(worker.exit_code)
-            iteration_findings = [
-                "Prior worker attempt exited {} with no usable result — "
-                "reattempt the task.".format(worker.exit_code)
-            ]
+            cause = "worker exited {}".format(worker.exit_code)
+            findings = [_execution_failure_finding(
+                "Prior worker attempt exited {} with no usable result — reattempt "
+                "the task.".format(worker.exit_code))]
         elif not acc_ok:
             failed = next(r for r in acceptance if r.exit_code != 0)
-            failure_summary = "acceptance failed: {}".format(failed.command)
-            iteration_findings = [
+            cause = "acceptance failed: {}".format(failed.command)
+            findings = [_execution_failure_finding(
                 "Acceptance command `{}` failed (exit {}). Output tail:\n{}".format(
-                    failed.command, failed.exit_code, failed.output_tail
-                )
-            ]
+                    failed.command, failed.exit_code, failed.output_tail))]
         elif task.tier != "trivial":
             # Trivial tier: acceptance is the whole verification. Standard/complex:
-            # a reviewer judges the diff against the spec.
+            # a reviewer judges the diff against the spec, and the runner verifies
+            # provenance against that same diff and derives each finding's
+            # disposition (the matrix) — the reviewer proposes, the runner decides.
             if review_base is None:
                 raise RuntimeError(
                     "cannot generate review packet for task {}: cwd is not a git "
                     "repository".format(task.number)
                 )
             update_run_progress(run_dir, task.number, "review")
-            packet_path = _packet_for(task, plan_path, run_dir, review_base, cwd)
+            packet_path = _packet_for(
+                task, plan_path, run_dir, review_base, cwd,
+                prior_findings=prior_findings or None,
+            )
             verdict = dispatch_reviewer(task, packet_path, codex_bin, run_dir, timeout=timeout)
+            classify_findings(verdict, _git_diff(cwd, review_base))
             review_verdict = verdict_to_dict(verdict)
-            if verdict.kind == "findings":
-                # parse_verdict now yields Finding objects; the current loop still
-                # treats any findings verdict as rework and carries the summary
-                # text into the next brief (the disposition-aware convergence loop
-                # is Task 3). Extract the human-readable summaries so the carry /
-                # receipt stay JSON-serializable list[str] as before.
-                iteration_findings = [f.summary for f in verdict.findings]
-                failure_summary = "review findings: {}".format(
-                    "; ".join(iteration_findings) if iteration_findings else "(unspecified)"
-                )
+            findings = verdict.findings
 
-        passed = failure_summary is None
-        if passed:
-            status = "passed"
-        elif attempt >= MAX_ATTEMPTS_BACKSTOP:
-            status = "escalated"
-        else:
-            status = "rework"
+        action, halt_reason = convergence_decision(
+            findings, state, acc_ok, attempt, autofix_mode
+        )
+        advance_state(state, findings, acc_ok)
+
+        fix_findings = [f for f in findings if f.disposition == "fix"]
+        deferrals = [finding_to_dict(f) for f in findings if f.disposition == "defer"]
+        halted = [f for f in findings if f.disposition == "halt"]
+        repair_task = halted[0].repair_task if halted else None
+        status = {"pass": "passed", "rework": "rework", "halt": "escalated"}[action]
+        outstanding = [f.summary for f in findings] if action == "halt" else []
 
         receipt = {
             "task_number": task.number,
@@ -605,20 +736,34 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
             "review_verdict": review_verdict,
             "attempt": attempt,
             "status": status,
-            "outstanding_findings": iteration_findings if status == "escalated" else [],
+            "halt_reason": halt_reason,
+            "outstanding_findings": outstanding,
+            "repair_task": repair_task,
         }
         write_receipt(run_dir, task, attempt, receipt)
 
-        if passed:
-            return TaskOutcome(status="passed", attempts=attempt, summary="")
-        if status == "escalated":
+        if action == "pass":
+            return TaskOutcome(status="passed", attempts=attempt, summary="",
+                               deferrals=deferrals)
+        if action == "halt":
             return TaskOutcome(
                 status="escalated",
                 attempts=attempt,
-                summary=failure_summary,
-                findings=iteration_findings,
+                summary=cause or "{}: {}".format(
+                    halt_reason, "; ".join(outstanding) or "(unspecified)"),
+                findings=outstanding,
+                halt_reason=halt_reason,
+                deferrals=deferrals,
+                repair_task=repair_task,
             )
-        findings_carry = iteration_findings  # rework: carry into the next brief
+        # rework: carry the outstanding fix findings into the next brief (an
+        # execution-failure retry finding included — its summary is reattempt
+        # guidance) and the real reviewer fix findings into the next re-review
+        # packet (the implicit crash marker carries no review identity).
+        findings_carry = [f.summary for f in fix_findings]
+        prior_findings = [
+            finding_to_dict(f) for f in fix_findings if f.impact is not None
+        ]
 
 
 def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=None,

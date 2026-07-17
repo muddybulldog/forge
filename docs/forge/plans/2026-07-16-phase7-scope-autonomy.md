@@ -86,7 +86,7 @@ def classify_findings(verdict, diff_text) -> Verdict: ... # sets each finding's 
 **Depends on:** Task 1.
 
 ### Task 3: Convergence rework loop
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge-run.py` (ConvergenceState; convergence_decision; advance_state; execute_task rewrite; receipt dict gains per-finding classification + disposition + halt_reason + repair_task)

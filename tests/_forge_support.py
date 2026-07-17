@@ -247,6 +247,49 @@ PLAN_TWO_STD = """# Fixture Plan
 """
 
 
+# A standard (reviewed) task whose acceptance appends to an ALREADY-TRACKED file,
+# so `git diff <base>` is non-empty and a finding on the appended line is
+# runner-verified in-diff (disposition "fix"). Callers commit f1.txt in repo init.
+PLAN_STD_TRACKED = """# Fixture Plan
+
+**Goal:** Do the thing.
+
+### Task 1: Standard task
+- [ ] Done
+
+**Acceptance:** `echo NEEDFIX >> f1.txt`
+
+**Tier:** standard
+
+**Depends on:** nothing
+"""
+
+# PLAN_STD_TRACKED's reviewed task 1 followed by a trivial task 2 (depends on it) —
+# proves a per-task halt at task 1 never dispatches task 2.
+PLAN_STD_TRACKED_THEN_TRIVIAL = """# Fixture Plan
+
+**Goal:** Do the thing.
+
+### Task 1: Standard task
+- [ ] Done
+
+**Acceptance:** `echo NEEDFIX >> f1.txt`
+
+**Tier:** standard
+
+**Depends on:** nothing
+
+### Task 2: Trivial follow-up
+- [ ] Done
+
+**Acceptance:** `true`
+
+**Tier:** trivial — test fixture, mechanical
+
+**Depends on:** Task 1
+"""
+
+
 def _pass_msg():
     return '{"verdict": "pass"}'
 
@@ -273,6 +316,28 @@ def _findings_msg(*items):
         for i, item in enumerate(items, 1)
     ]
     return json.dumps({"verdict": "findings", "findings": findings})
+
+
+def _fix_findings_msg(file, lines, summary, id="f1",
+                      contract_ref="Acceptance: `true`", carried_from=None):
+    """Build a `findings` verdict (Phase 7 schema) with one contract-breaking
+    finding located at ``file:lines``. When the reviewed diff touches those lines
+    the runner verifies it in-diff -> disposition ``fix`` (rework); outside the
+    diff it is pre-existing -> ``halt`` (scope decision). Drives the disposition-
+    aware convergence loop through the fake reviewer. ``carried_from`` marks a
+    re-issued (``carried``) finding for stuck/regression matching."""
+    finding = {
+        "id": id,
+        "summary": summary,
+        "location": {"file": file, "lines": lines},
+        "provenance": "in-diff",
+        "impact": "contract-breaking",
+        "contract_ref": contract_ref,
+        "convergence": "carried" if carried_from else None,
+        "carried_from": carried_from,
+        "repair_task": None,
+    }
+    return json.dumps({"verdict": "findings", "findings": [finding]})
 
 
 # --- Phase 5: commit discipline fixtures -----------------------------------
@@ -408,6 +473,8 @@ __all__ = [
     "MINIMAL_SPEC",
     "PLAN_STD",
     "PLAN_STD_THEN_TRIVIAL",
+    "PLAN_STD_TRACKED",
+    "PLAN_STD_TRACKED_THEN_TRIVIAL",
     "PLAN_TWO_TRIVIAL",
     "PLAN_TWO_STD",
     "PLAN_COMMIT_ONE",
@@ -417,6 +484,7 @@ __all__ = [
     "PLAN_COMMIT_NOOP",
     "_pass_msg",
     "_findings_msg",
+    "_fix_findings_msg",
     "_log_argvs",
     "_find_dispatch",
 ]

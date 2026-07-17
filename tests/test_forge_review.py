@@ -237,14 +237,22 @@ class ReviewLoopTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "passed")
         self.assertEqual(receipt["review_verdict"], {"verdict": "pass"})
 
-    def test_findings_then_rework_carries_findings_text_in_worker_prompt(self):
-        plan = self._plan(PLAN_STD)
+    def test_fix_finding_then_rework_carries_findings_text_in_worker_prompt(self):
+        # An in-diff contract-breaking finding (disposition "fix") reworks; its
+        # summary is carried into the rework worker's brief. f1.txt is tracked and
+        # the acceptance appends to it, so the finding at f1.txt:2 is verified
+        # in-diff.
+        plan = self._plan(PLAN_STD_TRACKED)
+        with open(os.path.join(self.d, "f1.txt"), "w") as f:
+            f.write("base\n")
         self._init_repo()
         res = self._run(plan, responses=[
             {"exit": 0, "msg": ""},                                  # worker a1
-            {"exit": 0, "msg": _findings_msg("GUARDXYZ needed at a.py:3")},  # review a1
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "2", "GUARDXYZ needed here")},             # review a1 (fix)
             {"exit": 0, "msg": ""},                                  # worker a2 (rework)
             {"exit": 0, "msg": _pass_msg()},                         # review a2
+            {"exit": 0, "msg": _pass_msg()},                         # final review
         ])
         self.assertEqual(res.returncode, 0, res.stderr)
         # The rework worker's brief carries the finding text; the fake logs the
@@ -252,24 +260,31 @@ class ReviewLoopTests(unittest.TestCase):
         with open(self.log) as f:
             self.assertIn("GUARDXYZ", f.read())
 
-    def test_persistent_findings_verdict_hits_backstop_escalated_and_stops_next_task(self):
-        # A findings verdict that never resolves is clamped-repeated by the fake
-        # codex on every subsequent call, so the loop runs to the backstop
-        # (MAX_ATTEMPTS_BACKSTOP == 5, not the old 2-iteration cap) before
-        # escalating.
-        plan = self._plan(PLAN_STD_THEN_TRIVIAL_JUSTIFIED)
+    def test_persistent_fix_finding_stuck_escalated_and_stops_next_task(self):
+        # The same in-diff fix finding coming back across two consecutive attempts
+        # with nothing resolved is "stuck" -> escalate at attempt 2 (the worker
+        # cannot make progress), and the dependent task 2 is never dispatched.
+        plan = self._plan(PLAN_STD_TRACKED_THEN_TRIVIAL)
+        with open(os.path.join(self.d, "f1.txt"), "w") as f:
+            f.write("base\n")
         self._init_repo()
         res = self._run(plan, responses=[
-            {"exit": 0, "msg": ""},                              # t1 worker a1
-            {"exit": 0, "msg": _findings_msg("a.py:1 - issue")}, # t1 review a1
-            {"exit": 0, "msg": ""},                              # t1 worker a2
-            {"exit": 0, "msg": _findings_msg("a.py:1 - still")}, # t1 review a2 (repeats)
+            {"exit": 0, "msg": ""},                                    # t1 worker a1
+            {"exit": 0, "msg": _fix_findings_msg("f1.txt", "2", "issue")},  # t1 review a1
+            {"exit": 0, "msg": ""},                                    # t1 worker a2
+            {"exit": 0, "msg": _fix_findings_msg("f1.txt", "2", "still")},  # t1 review a2
         ])
         self.assertEqual(res.returncode, 2, res.stderr)
-        with open(os.path.join(self.run_dir, "task-1-attempt-5.json")) as f:
+        with open(os.path.join(self.run_dir, "task-1-attempt-2.json")) as f:
             receipt = json.load(f)
         self.assertEqual(receipt["status"], "escalated")
+        self.assertEqual(receipt["halt_reason"], "stuck")
         self.assertTrue(receipt["outstanding_findings"])
+        # The attempt-2 re-review packet carries the prior attempt's finding set so
+        # the reviewer can label convergence against it (task-N-review.md is
+        # overwritten each attempt, so this is attempt 2's packet).
+        with open(os.path.join(self.run_dir, "task-1-review.md")) as f:
+            self.assertIn("Prior findings", f.read())
         # Task 2 is never dispatched.
         self.assertFalse(
             os.path.exists(os.path.join(self.run_dir, "task-2-worker-last.txt"))
