@@ -15,11 +15,10 @@ packaged as a plugin for Claude Code and Codex CLI.
 
 [Why it exists](#why-it-exists) ·
 [The flow](#the-flow) ·
+[Claude Code vs. Codex CLI](#claude-code-vs-codex-cli) ·
 [What it costs](#what-it-costs) ·
 [Anatomy](#anatomy) ·
 [Install](#install) ·
-[Running on Codex](#running-on-codex) ·
-[Developing](#developing-editing-skills) ·
 [Lineage](#lineage)
 
 </div>
@@ -96,45 +95,50 @@ written before there's compiler and test feedback gets written twice. Each
 task is tagged trivial, standard, or complex based on what it actually
 requires.
 
-**Execution** sends each task to a worker agent matched to its tier:
-`forge-light` (cheap model), `forge-standard`, or `forge-deep` (strongest
-model). The model is pinned in the agent definition, so switching models at
-the session level can't quietly downgrade a build. Workers do strict TDD
-(failing test first, then code) and get their instructions from generated
-brief files, so plan and spec content doesn't pile up in the orchestrator.
-Review scales with risk: trivial tasks just have to pass their acceptance
-commands, bigger tasks get a real review that **classifies** each finding —
-**fix** it, **defer** it (logged), or **halt** for a human decision — and
-reworks until the findings *converge* rather than for a fixed number of rounds.
-A final review runs the same loop over the whole diff. This
-review→classify→fix/defer/halt→converge cycle is the heart of forge's execution,
-and the decision itself — the classification and convergence rules — lives in
-one shared, tested module, `scripts/forge_dispose.py`: the Codex runner calls
-it in-process, the Claude orchestrator calls the identical logic through its
-CLI. One referee, two callers, so the rules can't quietly drift apart between
-harnesses. [**The execution loop**](docs/forge/execution-loop.md) is the full
-explanation. On Claude Code this dispatch happens in-session; on Codex CLI the
-same shape runs through a deterministic runner instead — see
-[Running on Codex](#running-on-codex).
+**Execution** sends each task to a worker agent matched to its tier —
+cheapest model for trivial work, strongest for complex — pinned per agent so
+a session-level model switch can't quietly downgrade a build. Workers do
+strict TDD (failing test first, then code). Review scales with risk: trivial
+tasks just pass their acceptance commands; bigger tasks get a real review
+that **classifies** each finding — **fix** it, **defer** it (logged), or
+**halt** for a human decision — and reworks until findings *converge* rather
+than for a fixed number of rounds. A final review runs the same loop over the
+whole diff. [**The execution loop**](docs/forge/execution-loop.md) is the
+full explanation of this cycle, including why it's the same decision logic on
+both harnesses.
 
-**Why forge runs implementation serially.** Both harnesses dispatch tasks one
-at a time, even though parallelizing independent tasks is technically possible
-(Claude's Workflow tool can fan out subagents). Parallelism buys only
-wall-clock time — it doesn't improve correctness, quality, or the decision
-logic above — and forge's commit discipline depends on a **linear** history:
-each task's review base is `git diff <prior commit>`, meaningful only when
-commits form a clean chain of vertical slices. Parallel writers mutating the
-tree at once break that chain and force worktree isolation plus ordered
-merge-back, and merge conflicts reintroduce exactly the integration mess
-per-task commits exist to prevent. Fan-out stays for **read-only** work —
-research, independent review lenses — where there's no shared mutable state to
-race. Coding writes; that's the part that stays serial.
+**Why forge runs implementation serially.** Tasks dispatch one at a time on
+both harnesses, even though fanning out independent tasks is technically
+possible. Parallelism would only buy wall-clock time — forge's commit
+discipline depends on a **linear** history, since each task's review base is
+`git diff <prior commit>`, meaningful only across a clean chain of vertical
+slices. Parallel writers break that chain and reintroduce the integration
+mess per-task commits exist to prevent. Fan-out stays for **read-only** work
+(research, independent review lenses); coding writes, and that stays serial.
 
 **Project memory** is three markdown files. `docs/forge/DECISIONS.md` holds
 what was decided and why — it's read before new work, and logged decisions
 are constraints. `DEFERRALS.md` holds work that was skipped on purpose.
 `ROADMAP.md` tracks phases. Workers can skip nice-to-haves if they log it;
 they can't skip anything the spec requires.
+
+## Claude Code vs. Codex CLI
+
+The flow, gates, and tiers are identical on both harnesses — only the
+execution substrate differs. Claude Code has native session infrastructure to
+lean on; Codex CLI doesn't, so forge supplies it.
+
+| | Claude Code | Codex CLI |
+|---|---|---|
+| Task dispatch | In-session, via the Workflow tool | External deterministic runner, `scripts/forge-run.py` — one `codex exec` process per task |
+| Isolation between tasks | Native worktrees | Process boundary (no worktree; sequential on the working tree) |
+| Halt visibility | Native session awareness | Foreground-only invocation — a halt relays into the conversation on non-zero exit |
+| Commits | Native review/commit flow | Explicit per-task commits (`forge: task N — <title>`) written by the runner |
+| Progress view | In-session | Optional live `rich` TUI (`sh .forge/watch`) reading run receipts |
+
+Full Codex operational detail — invocation, `--status`, the monitor, resume
+after a halt, and known Codex caveats — is in
+[**Running on Codex**](docs/forge/running-on-codex.md).
 
 ## What it costs
 
@@ -181,95 +185,11 @@ codex plugin install forge@forge
 The `SessionStart` hook works on Codex without extra wiring — the shared
 `hooks/hooks.json` schema is compatible and Codex sets `CLAUDE_PLUGIN_ROOT`.
 Plan execution then runs through forge's own runner, not in-session dispatch
-— see [Running on Codex](#running-on-codex).
+— see [Claude Code vs. Codex CLI](#claude-code-vs-codex-cli) and
+[Running on Codex](docs/forge/running-on-codex.md).
 
-## Running on Codex
-
-**Why there's extra machinery here.** Claude Code executes a plan natively —
-it spawns tier workers in-session and has native worktrees, code review, and
-verification to lean on. Codex CLI has none of those, so on Codex forge
-*supplies the execution layer itself*: a deterministic runner in place of
-in-session dispatch, foreground halt-relay in place of native session
-awareness, explicit per-task commits, and a live monitor. The flow, gates,
-and tiers are identical across both harnesses — only the execution substrate
-differs, and everything below is Codex catching up to what Claude gets
-in-harness.
-
-Plan execution runs through the runner — one `codex exec` process per task,
-model/effort pinned per tier:
-
-```bash
-python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" <plan.md> --spec <spec.md> --timeout 900
-```
-
-**Precondition:** the runner requires a clean working tree at start — `git status --porcelain` empty, with `.forge/` self-ignored. Dirty trees cause a contract error (exit 1) naming the dirty paths; commit or discard before re-invoking.
-
-**Review & rework:** the runner enforces forge's execution loop in code — it classifies every review finding (fix / defer / halt via the disposition matrix), reworks until findings *converge* (halting on regression or a genuine stall, not a fixed count), runs the same loop over the whole-plan final review, and finishes with a reconcile-only doc-sync pass. `--autofix auto` (default) applies the matrix; `--autofix gate` halts on any finding. This is the part of forge the Claude path doesn't yet enforce structurally — the full model and the per-harness difference are in [The execution loop](docs/forge/execution-loop.md).
-
-**Per-task commits:** after each task passes, the runner stages all changes and commits with message `forge: task N — <title>`. This establishes a clean checkpoint after every passed task for per-task review and resume. `.forge/` is never staged; the ledger annotation rides in the commit. Escalated tasks commit nothing — uncommitted work stays for human resolution.
-
-**Session awareness — run in the foreground.** Foreground is what makes a halt visible: the orchestrator is blocked on the command, so when the runner exits non-zero (escalation exit 2, contract error exit 1) it reads the receipt and relays the halt into the conversation — "task N escalated, needs your decision." The halt hands control straight back to a waiting orchestrator, so it can't go silent; no notifications or hooks needed. `--timeout 900` bounds every `codex exec` call, so a genuinely hung task is killed and escalated rather than sitting forever. Don't background-and-walk-away — that's what reintroduces blindness. Peek at any run on demand (dispatches nothing, exits 0):
-
-```bash
-python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" --status --run-dir .forge/runs/<name>
-```
-
-**Live monitor (optional).** For a live view, run the monitor in a second terminal — a full-screen `rich` TUI showing the plan ledger with the in-flight task lit, that task's `codex exec` output scrolling, and a full-width banner when the run completes or halts. The recommended shape is a **standing monitor**: leave it open once and it attaches to every run.
-
-```bash
-sh .forge/watch      # standing monitor (forge-monitor.py --follow); the runner prints this at start
-```
-
-`--follow` watches the newest run and auto-flips to each new run as it starts, so there's no per-run step; the runner writes the `.forge/watch` launcher and prints the short command (`monitor: sh .forge/watch`) so there's no long path to copy. One-shot forms also exist: `forge-monitor.py --latest` (newest run, then exit) or `--run-dir .forge/runs/<name>`. It only reads the run dir (dispatches nothing) and needs `rich` (`pip install rich`; on a PEP-668-managed Python use `--break-system-packages` or a venv); a killed runner shows as `stalled?` rather than a stuck spinner. `--status` above stays the zero-dependency peek.
-
-See `skills/planning/codex-execution.md` for the invocation contract,
-halt/resume, and the orchestrator's reduced role. Receipts land in
-`.forge/runs/<timestamp>/`, uncommitted — the runner writes a self-ignoring
-`.forge/.gitignore` (`*`) on first run, so there's no target-repo setup.
-
-<details>
-<summary><strong>Known Codex caveats</strong></summary>
-
-These apply to ad-hoc in-session Codex subagents (exploration, one-off
-review) — the only place forge still spawns them. Plan execution goes
-through `forge-run.py`'s one-`codex exec`-process-per-task instead, which
-sidesteps both issues by construction (no parent-model inheritance, no
-completed-worker accumulation).
-
-- Subagent selection has known regressions (custom-agent selection broke in
-  v0.137.0 and spawned agents silently inherited the parent model). If
-  spawned agents run the wrong model, check acceptance-command output rather
-  than trusting the spawn.
-- Spawned subagents pile up in the CLI's agent list, and completed workers
-  keep counting against the thread limit
-  ([openai/codex#19197](https://github.com/openai/codex/issues/19197),
-  [openai/codex#22779](https://github.com/openai/codex/issues/22779)).
-
-</details>
-
-## Developing (editing skills)
-
-On the machine where you edit the plugin, point the marketplace at your
-working copy so edits are picked up locally:
-
-```bash
-claude plugin marketplace add ~/development/forge
-```
-
-The plugin cache only re-syncs on a **version bump**. After editing anything
-under `skills/`, `agents/`, or `hooks/`:
-
-```bash
-# 1. bump "version" in BOTH .claude-plugin/plugin.json and .codex-plugin/plugin.json (lockstep — a test enforces it)
-# 2. then:
-claude plugin update forge@forge
-# 3. restart the session to apply
-```
-
-This repo uses its own conventions: decisions live in
-`docs/forge/DECISIONS.md` (read it before changing skill behavior), skipped
-work in `docs/forge/DEFERRALS.md`. The `docs/forge/` directory also opts
-this repo into its own session hook.
+Contributing to forge itself (editing skills/agents/hooks) is covered in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Lineage
 
