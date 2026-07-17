@@ -66,7 +66,7 @@ from forge_common import (  # noqa: F401
     ALLOWED_EFFORTS,
     CONTRACT_AGENT,
     DEFAULT_TIMEOUT,
-    MAX_ATTEMPTS,
+    MAX_ATTEMPTS_BACKSTOP,
     REVIEW_VERDICT_INSTRUCTION,
     TIER_MAP,
     TIER_ORDER,
@@ -357,13 +357,13 @@ def _brief_for(task, plan_path, spec_path, run_dir, attempt, findings):
 def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
                   effort_override=None, timeout=DEFAULT_TIMEOUT):
     """Run one task through the rework loop: worker -> acceptance -> (standard/
-    complex) reviewer, capped at MAX_ATTEMPTS. A worker crash, a worker timeout,
-    a failed acceptance command, or a findings verdict is a failed iteration;
-    the next iteration re-dispatches the worker with the outstanding findings
-    appended to the brief. Hitting the cap yields status ``escalated`` with the
-    outstanding findings on the final receipt. ``effort_override`` (from a
-    per-task ``--effort N=LEVEL`` CLI flag) replaces only this task's worker
-    effort, never the reviewer's."""
+    complex) reviewer, capped at MAX_ATTEMPTS_BACKSTOP. A worker crash, a
+    worker timeout, a failed acceptance command, or a findings verdict is a
+    failed iteration; the next iteration re-dispatches the worker with the
+    outstanding findings appended to the brief. Hitting the cap yields status
+    ``escalated`` with the outstanding findings on the final receipt.
+    ``effort_override`` (from a per-task ``--effort N=LEVEL`` CLI flag)
+    replaces only this task's worker effort, never the reviewer's."""
     model, effort = TIER_MAP[task.tier]
     if effort_override is not None:
         effort = effort_override
@@ -437,7 +437,7 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
         passed = failure_summary is None
         if passed:
             status = "passed"
-        elif attempt >= MAX_ATTEMPTS:
+        elif attempt >= MAX_ATTEMPTS_BACKSTOP:
             status = "escalated"
         else:
             status = "rework"

@@ -12,7 +12,7 @@
 **Global Constraints:** stdlib only (no new deps); reviewer↔runner JSON contract is the sole coupling — the reviewer proposes classification, the runner verifies/derives; provenance is never trusted from the reviewer over the diff; the runner never writes `docs/forge/DEFERRALS.md` (aggregates into run.json; orchestrator writes at completion).
 
 ### Task 1: Verdict model + constants
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge_common.py` (Finding dataclass; Verdict.findings → list[Finding]; TaskOutcome fields; constants; REVIEW_VERDICT_INSTRUCTION rewrite; verdict_to_dict/finding_to_dict)

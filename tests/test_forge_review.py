@@ -11,6 +11,7 @@ import types
 import unittest
 
 from _forge_support import *  # noqa: F401,F403
+import forge_common
 
 
 # Local, module-scoped copies with a Tier justification: _forge_support.py's
@@ -284,17 +285,21 @@ class ReviewLoopTests(unittest.TestCase):
         with open(self.log) as f:
             self.assertIn("GUARDXYZ", f.read())
 
-    def test_second_findings_verdict_halts_escalated_and_stops_next_task(self):
+    def test_persistent_findings_verdict_hits_backstop_escalated_and_stops_next_task(self):
+        # A findings verdict that never resolves is clamped-repeated by the fake
+        # codex on every subsequent call, so the loop runs to the backstop
+        # (MAX_ATTEMPTS_BACKSTOP == 5, not the old 2-iteration cap) before
+        # escalating.
         plan = self._plan(PLAN_STD_THEN_TRIVIAL_JUSTIFIED)
         self._init_repo()
         res = self._run(plan, responses=[
             {"exit": 0, "msg": ""},                              # t1 worker a1
             {"exit": 0, "msg": _findings_msg("a.py:1 - issue")}, # t1 review a1
             {"exit": 0, "msg": ""},                              # t1 worker a2
-            {"exit": 0, "msg": _findings_msg("a.py:1 - still")}, # t1 review a2
+            {"exit": 0, "msg": _findings_msg("a.py:1 - still")}, # t1 review a2 (repeats)
         ])
         self.assertEqual(res.returncode, 2, res.stderr)
-        with open(os.path.join(self.run_dir, "task-1-attempt-2.json")) as f:
+        with open(os.path.join(self.run_dir, "task-1-attempt-5.json")) as f:
             receipt = json.load(f)
         self.assertEqual(receipt["status"], "escalated")
         self.assertTrue(receipt["outstanding_findings"])
@@ -530,15 +535,148 @@ class ReviewNonGitTests(unittest.TestCase):
         argvs = _log_argvs(self.log)
         self.assertIsNone(_find_dispatch(argvs, "review-last"), argvs)
 
-    def test_worker_crash_counts_as_failed_iteration_within_cap(self):
+    def test_worker_crash_counts_as_failed_iteration_within_backstop(self):
         # Standard tier, but the worker crashes every attempt so the reviewer is
-        # never reached; two crashes hit the rework cap -> escalated, exit 2.
+        # never reached; five crashes hit MAX_ATTEMPTS_BACKSTOP -> escalated,
+        # exit 2 (the old 2-iteration cap is retired).
         plan = self._plan(PLAN_STD)
         res = self._run(plan, responses=[{"exit": 1, "msg": ""}])
         self.assertEqual(res.returncode, 2, res.stderr)
         argvs = _log_argvs(self.log)
         self.assertIsNone(_find_dispatch(argvs, "task-1-review-last"), argvs)
-        with open(os.path.join(self.run_dir, "task-1-attempt-2.json")) as f:
+        with open(os.path.join(self.run_dir, "task-1-attempt-5.json")) as f:
             receipt = json.load(f)
         self.assertEqual(receipt["status"], "escalated")
         self.assertEqual(receipt["worker_exit_code"], 1)
+
+
+class FindingModelTests(unittest.TestCase):
+    """Finding dataclass + finding_to_dict (Phase 7 Task 1 verdict model)."""
+
+    def test_finding_to_dict_roundtrips_all_fields(self):
+        f = forge_common.Finding(
+            id="f1",
+            summary="missing null check",
+            file="scripts/foo.py",
+            lines="12-20",
+            provenance="in-diff",
+            impact="contract-breaking",
+            contract_ref="Acceptance: `pytest -q`",
+            convergence="carried",
+            carried_from="f0",
+            repair_task={"title": "fix it"},
+            disposition="fix",
+        )
+        d = forge_common.finding_to_dict(f)
+        self.assertEqual(d["id"], "f1")
+        self.assertEqual(d["summary"], "missing null check")
+        self.assertEqual(d["location"], {"file": "scripts/foo.py", "lines": "12-20"})
+        self.assertEqual(d["provenance"], "in-diff")
+        self.assertEqual(d["impact"], "contract-breaking")
+        self.assertEqual(d["contract_ref"], "Acceptance: `pytest -q`")
+        self.assertEqual(d["convergence"], "carried")
+        self.assertEqual(d["carried_from"], "f0")
+        self.assertEqual(d["repair_task"], {"title": "fix it"})
+        self.assertEqual(d["disposition"], "fix")
+
+    def test_finding_to_dict_optional_fields_default_none(self):
+        f = forge_common.Finding(
+            id="f2", summary="nit", file="a.py", lines="3",
+            provenance="pre-existing", impact="improvement",
+        )
+        d = forge_common.finding_to_dict(f)
+        self.assertIsNone(d["contract_ref"])
+        self.assertIsNone(d["convergence"])
+        self.assertIsNone(d["carried_from"])
+        self.assertIsNone(d["repair_task"])
+        self.assertIsNone(d["disposition"])
+
+
+class VerdictSerializationTests(unittest.TestCase):
+    """verdict_to_dict over the new Finding-based Verdict.findings."""
+
+    def test_pass_verdict(self):
+        v = forge_common.Verdict(kind="pass")
+        self.assertEqual(forge_common.verdict_to_dict(v), {"verdict": "pass"})
+
+    def test_findings_verdict_serializes_two_findings(self):
+        f1 = forge_common.Finding(
+            id="f1", summary="one", file="a.py", lines="1",
+            provenance="in-diff", impact="contract-breaking",
+            contract_ref="Acceptance: `true`",
+        )
+        f2 = forge_common.Finding(
+            id="f2", summary="two", file="b.py", lines="5-6",
+            provenance="pre-existing", impact="improvement",
+        )
+        v = forge_common.Verdict(kind="findings", findings=[f1, f2])
+        d = forge_common.verdict_to_dict(v)
+        self.assertEqual(d["verdict"], "findings")
+        self.assertEqual(
+            d["findings"],
+            [forge_common.finding_to_dict(f1), forge_common.finding_to_dict(f2)],
+        )
+
+
+class TaskOutcomeFieldsTests(unittest.TestCase):
+    """TaskOutcome gains halt_reason/deferrals/repair_task (default-empty)."""
+
+    def test_defaults(self):
+        o = forge_common.TaskOutcome(status="passed", attempts=1, summary="")
+        self.assertIsNone(o.halt_reason)
+        self.assertEqual(o.deferrals, [])
+        self.assertIsNone(o.repair_task)
+
+    def test_settable(self):
+        o = forge_common.TaskOutcome(
+            status="escalated", attempts=5, summary="halted",
+            halt_reason="scope-decision", deferrals=[{"id": "f2"}],
+            repair_task={"title": "fix it"},
+        )
+        self.assertEqual(o.halt_reason, "scope-decision")
+        self.assertEqual(o.deferrals, [{"id": "f2"}])
+        self.assertEqual(o.repair_task, {"title": "fix it"})
+
+
+class ConstantsTests(unittest.TestCase):
+    """Rework backstop + autonomy/halt-reason constants (Phase 7 Task 1)."""
+
+    def test_max_attempts_backstop_is_five(self):
+        self.assertEqual(forge_common.MAX_ATTEMPTS_BACKSTOP, 5)
+
+    def test_old_max_attempts_name_is_gone(self):
+        self.assertFalse(hasattr(forge_common, "MAX_ATTEMPTS"))
+
+    def test_autofix_modes(self):
+        self.assertEqual(forge_common.AUTOFIX_MODES, ("auto", "gate"))
+
+    def test_halt_reasons(self):
+        self.assertEqual(
+            forge_common.HALT_REASONS,
+            ("scope-decision", "regression", "stuck", "backstop", "gate"),
+        )
+
+
+class ReviewVerdictInstructionTests(unittest.TestCase):
+    """REVIEW_VERDICT_INSTRUCTION names every per-finding schema field."""
+
+    def test_names_each_schema_field(self):
+        instr = forge_common.REVIEW_VERDICT_INSTRUCTION
+        for field_name in (
+            "id", "summary", "location", "file", "lines", "provenance",
+            "impact", "contract_ref", "convergence", "carried_from",
+            "repair_task",
+        ):
+            self.assertIn(field_name, instr, field_name)
+
+    def test_names_repair_task_subfields(self):
+        instr = forge_common.REVIEW_VERDICT_INSTRUCTION
+        for field_name in ("title", "files", "spec", "tests", "acceptance", "tier"):
+            self.assertIn(field_name, instr, field_name)
+
+    def test_names_classification_rules(self):
+        instr = forge_common.REVIEW_VERDICT_INSTRUCTION
+        self.assertIn("in-diff", instr)
+        self.assertIn("pre-existing", instr)
+        self.assertIn("contract-breaking", instr)
+        self.assertIn("improvement", instr)
