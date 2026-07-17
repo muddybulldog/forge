@@ -103,11 +103,15 @@ the session level can't quietly downgrade a build. Workers do strict TDD
 (failing test first, then code) and get their instructions from generated
 brief files, so plan and spec content doesn't pile up in the orchestrator.
 Review scales with risk: trivial tasks just have to pass their acceptance
-commands, bigger tasks get a real review, a second reviewer only steps in if
-the first finds problems, and after two fix rounds it comes back to me. A
-final review covers the whole diff. On Claude Code this dispatch happens
-in-session; on Codex CLI the same shape runs through a deterministic runner
-instead — see [Running on Codex](#running-on-codex).
+commands, bigger tasks get a real review that **classifies** each finding —
+**fix** it, **defer** it (logged), or **halt** for a human decision — and
+reworks until the findings *converge* rather than for a fixed number of rounds.
+A final review runs the same loop over the whole diff. This
+review→classify→fix/defer/halt→converge cycle is the heart of forge's execution;
+[**The execution loop**](docs/forge/execution-loop.md) is the full explanation,
+including how the Codex runner and the Claude path apply it differently today. On
+Claude Code this dispatch happens in-session; on Codex CLI the same shape runs
+through a deterministic runner instead — see [Running on Codex](#running-on-codex).
 
 **Project memory** is three markdown files. `docs/forge/DECISIONS.md` holds
 what was decided and why — it's read before new work, and logged decisions
@@ -182,6 +186,8 @@ python3 "$CLAUDE_PLUGIN_ROOT/scripts/forge-run.py" <plan.md> --spec <spec.md> --
 ```
 
 **Precondition:** the runner requires a clean working tree at start — `git status --porcelain` empty, with `.forge/` self-ignored. Dirty trees cause a contract error (exit 1) naming the dirty paths; commit or discard before re-invoking.
+
+**Review & rework:** the runner enforces forge's execution loop in code — it classifies every review finding (fix / defer / halt via the disposition matrix), reworks until findings *converge* (halting on regression or a genuine stall, not a fixed count), runs the same loop over the whole-plan final review, and finishes with a reconcile-only doc-sync pass. `--autofix auto` (default) applies the matrix; `--autofix gate` halts on any finding. This is the part of forge the Claude path doesn't yet enforce structurally — the full model and the per-harness difference are in [The execution loop](docs/forge/execution-loop.md).
 
 **Per-task commits:** after each task passes, the runner stages all changes and commits with message `forge: task N — <title>`. This establishes a clean checkpoint after every passed task for per-task review and resume. `.forge/` is never staged; the ledger annotation rides in the commit. Escalated tasks commit nothing — uncommitted work stays for human resolution.
 
