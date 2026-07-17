@@ -125,7 +125,7 @@ def advance_state(state, findings, acceptance_ok) -> None: ...   # updates resol
 **Depends on:** Task 2, Task 5.
 
 ### Task 4: Final-review loop
-- [ ] Done
+- [x] Done
 
 **Files:**
 - Modify: `scripts/forge-run.py` (run_final_review_loop; run_plan final-review block rewrite; final-review fix dispatch)

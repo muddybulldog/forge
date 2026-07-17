@@ -40,6 +40,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 
@@ -766,6 +767,218 @@ def execute_task(task, plan_path, spec_path, run_dir, codex_bin, cwd,
         ]
 
 
+# --- final review: whole-plan review through the same convergence loop -----
+
+
+def _final_review_fix_brief(spec_path, diff, findings, run_dir, attempt):
+    """Write the final-review fix-dispatch prompt: spec + whole-plan diff (for
+    context) + the outstanding ``fix`` findings to resolve. Never a full task
+    brief — there is no task to reissue, only what the reviewer flagged as
+    in-diff and contract-breaking. Overwritten fresh each attempt, like the
+    per-task rework brief."""
+    with open(spec_path, "r", encoding="utf-8") as f:
+        spec_text = f.read()
+    lines = ["## Final-review fix — resolve these findings", ""]
+    for finding in findings:
+        loc = " ({}:{})".format(finding.file, finding.lines) if finding.file else ""
+        lines.append("- {}{}".format(finding.summary, loc))
+    diff_body = diff if diff.strip() else "(no changes)\n"
+    if not diff_body.endswith("\n"):
+        diff_body += "\n"
+    # Fence must outrun any backtick run in the diff so a diffed line like
+    # " ```" (context-prefixed fence, ≤3-space indent) can't close it early
+    # — same problem, same fix as review-packet.py's build_packet.
+    longest_run = max(
+        (len(m.group(0)) for m in re.finditer(r"`+", diff_body)), default=0
+    )
+    fence = "`" * max(3, longest_run + 1)
+    diff_section = fence + "diff\n" + diff_body + fence + "\n"
+    brief = (
+        spec_text.rstrip("\n") + "\n\n"
+        + "\n".join(lines) + "\n\n"
+        + "## Whole-plan diff\n\n" + diff_section
+    )
+    brief_path = os.path.join(
+        run_dir, "final-review-fix-attempt-{}-brief.md".format(attempt)
+    )
+    with open(brief_path, "w", encoding="utf-8") as f:
+        f.write(brief)
+    return brief_path
+
+
+def dispatch_final_review_fix(brief_path, codex_bin, run_dir, tier, attempt,
+                              timeout=DEFAULT_TIMEOUT):
+    """Final-review fix dispatch: one ``codex exec`` call scoped to the
+    outstanding ``fix`` findings against the whole-plan diff — the final-review
+    "worker" (Final review spec), never a full task brief re-dispatch. Same call
+    shape as dispatch_worker (contract preamble + prompt, --output-last-message,
+    timeout-bounded); tier = the plan's highest task tier."""
+    model, effort = TIER_MAP[tier]
+    preamble = contract_preamble(tier)
+    with open(brief_path, "r", encoding="utf-8") as f:
+        brief = f.read()
+    prompt = preamble + "\n\n" + brief
+    last_msg_path = os.path.join(
+        run_dir, "final-review-fix-attempt-{}-last.txt".format(attempt)
+    )
+    argv = [
+        codex_bin,
+        "exec",
+        "-m",
+        model,
+        "-c",
+        "model_reasoning_effort={}".format(effort),
+        "--output-last-message",
+        last_msg_path,
+        prompt,
+    ]
+    live_path = os.path.join(run_dir, "final-review-live.log")
+    header = "── final-review fix · codex exec · {} · {} ──".format(model, effort)
+    result = run_teed(argv, timeout=timeout, live_path=live_path, header=header)
+    if result.timed_out:
+        return WorkerResult(exit_code=None, last_message="", argv=argv, timed_out=True)
+    last_message = ""
+    if os.path.exists(last_msg_path):
+        with open(last_msg_path, "r", encoding="utf-8") as f:
+            last_message = f.read()
+    return WorkerResult(exit_code=result.exit_code, last_message=last_message, argv=argv)
+
+
+def _git_commit_final_review_fixes(cwd):
+    """Commit every final-review fix-dispatch edit as one ``fix: final-review``
+    commit, once the loop converges to pass — regardless of how many fix-dispatch
+    attempts it took (Commit discipline: a single commit, not one per attempt).
+    Returns the new HEAD SHA, or None when nothing was staged (the fix
+    dispatch(es) made no net change) or ``cwd`` is not a git repo. Mirrors
+    ``_git_commit_task``'s empty-commit guard; kept local rather than added to
+    forge_git.py since there is no Task to key a per-task message off — the
+    commit message here is fixed, not derived."""
+    if _git_head(cwd) is None:
+        return None
+    add = subprocess.run(["git", "add", "-A"], cwd=cwd, capture_output=True, text=True)
+    if add.returncode != 0:
+        raise RuntimeError(
+            "git add -A for final-review fix failed in {}: {}".format(
+                cwd, add.stderr.strip()
+            )
+        )
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"], cwd=cwd, capture_output=True, text=True
+    )
+    if staged.returncode == 0:
+        return None  # nothing staged -> skip, no empty commit
+    commit = subprocess.run(
+        ["git", "commit", "-m", "fix: final-review"], cwd=cwd,
+        capture_output=True, text=True,
+    )
+    if commit.returncode != 0:
+        raise RuntimeError(
+            "git commit for final-review fix failed in {}: {}".format(
+                cwd, commit.stderr.strip()
+            )
+        )
+    return _git_head(cwd)
+
+
+def run_final_review_loop(spec_path, run_base, run_dir, codex_bin, cwd, tier,
+                          autofix_mode, timeout=DEFAULT_TIMEOUT):
+    """Whole-plan final review through the same convergence loop as
+    ``execute_task`` (Final review spec: "now runs the same loop"). Diff base is
+    always ``run_base`` (run-start HEAD) across every attempt — a fix dispatch's
+    edits are left uncommitted, so each re-review's diff simply accumulates them;
+    a single ``fix: final-review`` commit lands once the loop converges to pass,
+    only if a fix was ever applied (Commit discipline). Attempt 1 is review-only
+    (nothing to fix yet); from attempt 2 on, the "worker" is a
+    dispatch_final_review_fix call scoped to the outstanding ``fix`` findings — a
+    fix-dispatch crash/timeout preempts the re-review as an implicit
+    execution-failure finding, exactly like ``execute_task``. Halt carries the
+    drafted ``repair_task``."""
+    state = ConvergenceState()
+    fix_findings = []  # outstanding fix findings -> next attempt's fix dispatch
+    prior_findings = []  # outstanding reviewer fix findings (dicts) -> next packet
+    applied_fix = False
+    attempt = 0
+    while True:
+        attempt += 1
+        exec_ok = True
+        findings = []
+
+        if fix_findings:
+            update_run_progress(run_dir, None, "final-review-fix")
+            diff = _git_diff(cwd, run_base)
+            brief_path = _final_review_fix_brief(
+                spec_path, diff, fix_findings, run_dir, attempt
+            )
+            worker = dispatch_final_review_fix(
+                brief_path, codex_bin, run_dir, tier, attempt, timeout=timeout
+            )
+            applied_fix = True
+            if worker.timed_out:
+                exec_ok = False
+                findings = [_execution_failure_finding(
+                    "Prior final-review fix dispatch timed out after {}s with no "
+                    "usable result — reattempt.".format(timeout))]
+            elif worker.exit_code != 0:
+                exec_ok = False
+                findings = [_execution_failure_finding(
+                    "Prior final-review fix dispatch exited {} with no usable "
+                    "result — reattempt.".format(worker.exit_code))]
+
+        if exec_ok:
+            update_run_progress(run_dir, None, "final-review")
+            diff = _git_diff(cwd, run_base)
+            packet_path = _final_packet(
+                spec_path, run_base, diff, run_dir,
+                prior_findings=prior_findings or None,
+            )
+            verdict = dispatch_final_review(
+                packet_path, codex_bin, run_dir, tier, timeout=timeout
+            )
+            classify_findings(verdict, diff)
+            write_final_review_receipt(run_dir, verdict)
+            findings = verdict.findings
+
+        # The final review has no acceptance command that can regress, so the
+        # acceptance signal is always green: a fix-dispatch crash is an implicit
+        # fix-retry finding (rework to backstop), exactly like execute_task's
+        # worker crash — never a spurious green->red regression (regression here
+        # is only a resolved reviewer finding reappearing).
+        action, halt_reason = convergence_decision(
+            findings, state, True, attempt, autofix_mode
+        )
+        advance_state(state, findings, True)
+
+        fix_findings = [f for f in findings if f.disposition == "fix"]
+        # Carry only real reviewer fix findings (not the execution-failure
+        # marker, which has no review identity) into the next re-review packet.
+        prior_findings = [
+            finding_to_dict(f) for f in fix_findings if f.impact is not None
+        ]
+        deferrals = [finding_to_dict(f) for f in findings if f.disposition == "defer"]
+        halted = [f for f in findings if f.disposition == "halt"]
+        repair_task = halted[0].repair_task if halted else None
+        outstanding = [f.summary for f in findings] if action == "halt" else []
+
+        if action == "pass":
+            if applied_fix:
+                _git_commit_final_review_fixes(cwd)
+            return TaskOutcome(
+                status="passed", attempts=attempt, summary="", deferrals=deferrals
+            )
+        if action == "halt":
+            return TaskOutcome(
+                status="escalated",
+                attempts=attempt,
+                summary="{}: {}".format(
+                    halt_reason, "; ".join(outstanding) or "(unspecified)"),
+                findings=outstanding,
+                halt_reason=halt_reason,
+                deferrals=deferrals,
+                repair_task=repair_task,
+            )
+        # rework: fix_findings (set above) drives the next attempt's fix dispatch.
+
+
 def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=None,
              timeout=DEFAULT_TIMEOUT):
     """Sequential whole-plan loop. Tasks already ``passed`` in this run-dir (a
@@ -905,19 +1118,20 @@ def run_plan(plan_path, spec_path, run_dir, codex_bin, cwd, effort_overrides=Non
 
     if not escalated and run_base is not None:
         # Final broad review: whole-plan diff + spec, one reviewer at the plan's
-        # highest task tier (not a pinned ceiling). No rework loop at plan level —
-        # findings are a human gate. Skipped when the diff is empty (nothing to
-        # review) or cwd is not a git repo (no baseline).
+        # highest task tier (not a pinned ceiling), now run through the same
+        # convergence loop as a per-task review (Final review spec) — a fix
+        # dispatch reworks in-diff/contract-breaking findings in-loop, and only a
+        # genuine scope decision (or --gate, wired in Task 7) halts. Skipped when
+        # the diff is empty (nothing to review) or cwd is not a git repo (no
+        # baseline).
         diff = _git_diff(cwd, run_base)
         if diff.strip():
             final_tier = max(tasks, key=lambda t: TIER_ORDER.index(t.tier)).tier
-            update_run_progress(run_dir, None, "final-review")
-            packet_path = _final_packet(spec_path, run_base, diff, run_dir)
-            verdict = dispatch_final_review(
-                packet_path, codex_bin, run_dir, final_tier, timeout=timeout
+            final_outcome = run_final_review_loop(
+                spec_path, run_base, run_dir, codex_bin, cwd, final_tier,
+                "auto", timeout=timeout,
             )
-            write_final_review_receipt(run_dir, verdict)
-            if verdict.kind == "findings":
+            if final_outcome.status == "escalated":
                 overall = "escalated-final-review"
 
     # Terminal write: no current_task/current_phase, so the pointer is cleared —

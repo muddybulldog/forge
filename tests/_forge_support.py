@@ -27,7 +27,10 @@ _spec.loader.exec_module(forge_run)
 # A fake `codex` binary: appends its argv (JSON) to FORGE_FAKE_LOG, reads a
 # per-call response from FORGE_FAKE_RESPONSES ([{"exit":int,"msg":str}, ...],
 # index = prior log line count, clamped to last), writes msg to the
-# --output-last-message path, and exits with the scripted code.
+# --output-last-message path, optionally simulates a real-worker file edit via
+# ``append_file``/``append_text`` (an absolute path; a real `codex exec` worker
+# edits repo files directly, which this fake cannot do — used to exercise commit
+# discipline around a fix dispatch), and exits with the scripted code.
 FAKE_CODEX_SRC = '''#!/usr/bin/env python3
 import json, os, sys, time
 argv = sys.argv[1:]
@@ -44,6 +47,8 @@ msg = ""
 sleep_s = 0
 out = ""
 err = ""
+append_file = None
+append_text = ""
 resp = os.environ.get("FORGE_FAKE_RESPONSES")
 if resp and os.path.exists(resp):
     with open(resp) as f:
@@ -55,6 +60,8 @@ if resp and os.path.exists(resp):
         sleep_s = r.get("sleep", 0)
         out = r.get("stdout", "")
         err = r.get("stderr", "")
+        append_file = r.get("append_file")
+        append_text = r.get("append_text", "")
 if sleep_s:
     time.sleep(sleep_s)
 if out:
@@ -63,6 +70,9 @@ if out:
 if err:
     sys.stderr.write(err)
     sys.stderr.flush()
+if append_file:
+    with open(append_file, "a") as f:
+        f.write(append_text)
 if "--output-last-message" in argv:
     p = argv[argv.index("--output-last-message") + 1]
     with open(p, "w") as f:
@@ -319,13 +329,16 @@ def _findings_msg(*items):
 
 
 def _fix_findings_msg(file, lines, summary, id="f1",
-                      contract_ref="Acceptance: `true`", carried_from=None):
+                      contract_ref="Acceptance: `true`", carried_from=None,
+                      repair_task=None):
     """Build a `findings` verdict (Phase 7 schema) with one contract-breaking
     finding located at ``file:lines``. When the reviewed diff touches those lines
     the runner verifies it in-diff -> disposition ``fix`` (rework); outside the
     diff it is pre-existing -> ``halt`` (scope decision). Drives the disposition-
     aware convergence loop through the fake reviewer. ``carried_from`` marks a
-    re-issued (``carried``) finding for stuck/regression matching."""
+    re-issued (``carried``) finding for stuck/regression matching. ``repair_task``
+    (a plan-task-shaped dict) is the drafted repair payload a halt-disposition
+    finding carries — pass it when the fixture is meant to land outside the diff."""
     finding = {
         "id": id,
         "summary": summary,
@@ -335,7 +348,7 @@ def _fix_findings_msg(file, lines, summary, id="f1",
         "contract_ref": contract_ref,
         "convergence": "carried" if carried_from else None,
         "carried_from": carried_from,
-        "repair_task": None,
+        "repair_task": repair_task,
     }
     return json.dumps({"verdict": "findings", "findings": [finding]})
 

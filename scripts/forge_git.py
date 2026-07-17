@@ -118,12 +118,16 @@ def _packet_for(task, plan_path, run_dir, base, cwd, prior_findings=None):
     return path
 
 
-def _final_packet(spec_path, base, diff, run_dir):
+def _final_packet(spec_path, base, diff, run_dir, prior_findings=None):
     """Whole-plan final-review packet: the spec + the whole-plan ``git diff
-    <base>``, assembled by review-packet.py's fence-safe builder."""
+    <base>``, assembled by review-packet.py's fence-safe builder. On a re-review
+    ``prior_findings`` (a persisted finding_to_dict() list) carries the prior
+    attempt's outstanding fix findings into the packet so the fresh-context final
+    reviewer labels each current finding resolved/carried/new against them —
+    identical to the per-task path (Final review spec: "the same loop")."""
     with open(spec_path, "r", encoding="utf-8") as f:
         spec_text = f.read()
-    packet = rp.build_packet(spec_text, base, diff)
+    packet = rp.build_packet(spec_text, base, diff, prior_findings=prior_findings)
     path = os.path.join(run_dir, "final-review.md")
     with open(path, "w", encoding="utf-8") as f:
         f.write(packet)

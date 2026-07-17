@@ -357,17 +357,20 @@ class ReviewLoopTests(unittest.TestCase):
         self.assertIn("gpt-5.6-sol", fr)
         self.assertIn("model_reasoning_effort=medium", fr)
 
-    def test_final_review_findings_exit_two_status_escalated_final_review(self):
+    def test_final_review_improvement_finding_defers_run_completes(self):
+        # An improvement-only final-review finding (no contract_ref) defers
+        # rather than halting -- findings are no longer a single-shot human gate
+        # (Deferral handling: "improvement finding -> defer, run continues").
         plan = self._plan(PLAN_PASS_JUSTIFIED)
         self._init_repo()
         res = self._run(plan, responses=[
             {"exit": 0, "msg": ""},                                   # worker
             {"exit": 0, "msg": _findings_msg("spec drift at x")},     # final review
         ])
-        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertEqual(res.returncode, 0, res.stderr)
         with open(os.path.join(self.run_dir, "run.json")) as f:
             summary = json.load(f)
-        self.assertEqual(summary["status"], "escalated-final-review")
+        self.assertEqual(summary["status"], "passed")
 
     def test_second_reviewed_task_packet_isolated_to_its_own_diff(self):
         # Two sequential standard tasks, each mutating its OWN tracked file. Task 1
@@ -469,6 +472,240 @@ class ReviewLoopTests(unittest.TestCase):
             content = f.read()
         self.assertIn("forge-monitor.py", content)
         self.assertIn("--follow", content)
+
+
+class FinalReviewLoopTests(unittest.TestCase):
+    """run_final_review_loop: the whole-plan final review now runs the same
+    convergence loop as a per-task review (Final review spec: "now runs the
+    same loop"). Exercised directly (not through the full CLI, since the
+    --gate case has no CLI flag until Task 7) against the fake codex over a
+    real git repo -- the diff base is always ``run_base``, so a fix dispatch's
+    edits stay uncommitted and simply accumulate into the next re-review's
+    diff."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="forge-run-finalreview-")
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.fake = write_fake_codex(self.d)
+        self.spec = os.path.join(self.d, "spec.md")
+        with open(self.spec, "w") as f:
+            f.write(MINIMAL_SPEC)
+        self.run_dir = os.path.join(self.d, "run")
+        os.makedirs(self.run_dir)
+        self.log = os.path.join(self.d, "fakelog")
+        self._set_env("FORGE_FAKE_LOG", self.log)
+
+    def _set_env(self, key, value):
+        old = os.environ.get(key)
+        os.environ[key] = value
+        self.addCleanup(
+            lambda: os.environ.__setitem__(key, old)
+            if old is not None
+            else os.environ.pop(key, None)
+        )
+
+    def _responses(self, responses):
+        resp_path = os.path.join(self.d, "responses.json")
+        with open(resp_path, "w") as f:
+            json.dump(responses, f)
+        self._set_env("FORGE_FAKE_RESPONSES", resp_path)
+
+    def _git(self, *args):
+        subprocess.run(
+            ["git", *args], cwd=self.d, check=True, capture_output=True, text=True
+        )
+
+    def _init_repo_with_task_work(self):
+        # A base commit, then a second commit simulating the plan's own task
+        # work (an append to a tracked file) -- run_base is the commit BEFORE
+        # the task work, so the whole-plan diff has something to point a
+        # finding at.
+        self._git("init")
+        self._git("config", "user.email", "t@example.com")
+        self._git("config", "user.name", "Test")
+        with open(os.path.join(self.d, "f1.txt"), "w") as f:
+            f.write("base\n")
+        self._git("add", "-A")
+        self._git("commit", "-m", "base")
+        run_base = forge_run._git_head(self.d)
+        with open(os.path.join(self.d, "f1.txt"), "a") as f:
+            f.write("NEEDFIX\n")
+        self._git("add", "-A")
+        self._git("commit", "-m", "task work")
+        return run_base
+
+    def _log_lines(self):
+        return subprocess.run(
+            ["git", "log", "--oneline"], cwd=self.d,
+            capture_output=True, text=True, check=True,
+        ).stdout
+
+    def test_findings_fix_then_repass_commits_once(self):
+        run_base = self._init_repo_with_task_work()
+        self._responses([
+            {"exit": 0, "msg": _fix_findings_msg("f1.txt", "2", "issue")},  # a1
+            {"exit": 0, "msg": "",                                          # fix dispatch
+             "append_file": os.path.join(self.d, "f1.txt"),
+             "append_text": "FIXED\n"},
+            {"exit": 0, "msg": _pass_msg()},                                # a2
+        ])
+        outcome = forge_run.run_final_review_loop(
+            self.spec, run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto",
+        )
+        self.assertEqual(outcome.status, "passed")
+        self.assertEqual(outcome.attempts, 2)
+        log = self._log_lines()
+        self.assertEqual(log.count("fix: final-review"), 1)
+
+    def test_pre_existing_contract_breaking_halts_with_repair_task(self):
+        run_base = self._init_repo_with_task_work()
+        repair = {"title": "Fix legacy bug", "tier": "standard"}
+        self._responses([
+            # line 99 is well outside the two-line diff -> verified pre-existing.
+            {"exit": 0, "msg": _fix_findings_msg(
+                "f1.txt", "99", "legacy bug", repair_task=repair)},
+        ])
+        outcome = forge_run.run_final_review_loop(
+            self.spec, run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto",
+        )
+        self.assertEqual(outcome.status, "escalated")
+        self.assertEqual(outcome.halt_reason, "scope-decision")
+        self.assertEqual(outcome.repair_task, repair)
+        self.assertNotIn("fix: final-review", self._log_lines())
+
+    def test_improvement_finding_defers_run_completes(self):
+        run_base = self._init_repo_with_task_work()
+        self._responses([
+            {"exit": 0, "msg": _findings_msg("style nit")},  # improvement -> defer
+        ])
+        outcome = forge_run.run_final_review_loop(
+            self.spec, run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto",
+        )
+        self.assertEqual(outcome.status, "passed")
+        self.assertEqual(len(outcome.deferrals), 1)
+        self.assertNotIn("fix: final-review", self._log_lines())
+
+    def test_gate_mode_halts_on_any_finding(self):
+        run_base = self._init_repo_with_task_work()
+        self._responses([
+            {"exit": 0, "msg": _findings_msg("even a harmless nit")},
+        ])
+        outcome = forge_run.run_final_review_loop(
+            self.spec, run_base, self.run_dir, self.fake, self.d,
+            "standard", "gate",
+        )
+        self.assertEqual(outcome.status, "escalated")
+        self.assertEqual(outcome.halt_reason, "gate")
+        self.assertNotIn("fix: final-review", self._log_lines())
+
+    def test_rereview_packet_carries_prior_findings(self):
+        # A re-review's packet must carry the prior attempt's outstanding fix
+        # findings so a fresh-context final reviewer can label resolved/carried/
+        # new — same as the per-task path. Without threading, the final reviewer
+        # is told nothing and the convergence stop silently degrades to
+        # backstop-only (Final review spec: "the same loop").
+        run_base = self._init_repo_with_task_work()
+        self._responses([
+            {"exit": 0, "msg": _fix_findings_msg("f1.txt", "2", "issue")},   # a1 -> fix
+            {"exit": 0, "msg": "",                                           # fix dispatch
+             "append_file": os.path.join(self.d, "f1.txt"), "append_text": "FIXED\n"},
+            {"exit": 0, "msg": _pass_msg()},                                 # a2 re-review -> pass
+        ])
+        outcome = forge_run.run_final_review_loop(
+            self.spec, run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto",
+        )
+        self.assertEqual(outcome.status, "passed")
+        packet = open(os.path.join(self.run_dir, "final-review.md")).read()
+        self.assertIn("Prior findings", packet)
+        self.assertIn("issue", packet)
+
+    def test_transient_fix_dispatch_crash_reworks_not_regression(self):
+        # The final loop has no acceptance command that can regress; a fix-
+        # dispatch crash is an implicit fix-retry (rework to backstop), exactly
+        # like execute_task's worker crash — never a spurious green->red
+        # regression halt.
+        run_base = self._init_repo_with_task_work()
+        self._responses([
+            {"exit": 0, "msg": _fix_findings_msg("f1.txt", "2", "issue")},   # a1 -> fix
+            {"exit": 1, "msg": ""},                                          # a2 fix dispatch crashes
+            {"exit": 0, "msg": "",                                           # a3 fix dispatch succeeds
+             "append_file": os.path.join(self.d, "f1.txt"), "append_text": "FIXED\n"},
+            {"exit": 0, "msg": _pass_msg()},                                 # a3 re-review -> pass
+        ])
+        outcome = forge_run.run_final_review_loop(
+            self.spec, run_base, self.run_dir, self.fake, self.d,
+            "standard", "auto",
+        )
+        self.assertEqual(outcome.status, "passed")
+        self.assertNotEqual(outcome.halt_reason, "regression")
+        self.assertEqual(outcome.attempts, 3)
+
+
+class FinalReviewFixBriefFenceTests(unittest.TestCase):
+    """_final_review_fix_brief must fence the whole-plan diff with a
+    dynamic-length fence (review-packet.py's build_packet precedent), not a
+    hardcoded ```diff, since the whole-plan diff can itself contain triple-
+    backtick runs (e.g. a diffed line touching a plan/spec .md file full of
+    ```python interface fences) that would close the fence early."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="forge-run-finalreviewbrief-")
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.spec = os.path.join(self.d, "spec.md")
+        with open(self.spec, "w") as f:
+            f.write(MINIMAL_SPEC)
+        self.run_dir = os.path.join(self.d, "run")
+        os.makedirs(self.run_dir)
+
+    def test_fence_survives_triple_backtick_run_in_diff(self):
+        # A diff hunk containing a context (unchanged) ``` fenced block, as
+        # would appear in a diff touching a plan/spec markdown file alongside
+        # the fix target. Context lines carry a single leading space in
+        # unified diff output -- a ≤3-space indent that markdown still
+        # recognizes as a fence closer, so " ```" closes a hardcoded ```diff
+        # fence early (review-packet.py's build_packet docstring, verbatim).
+        diff = (
+            "diff --git a/docs/plan.md b/docs/plan.md\n"
+            " ```python\n"
+            " def f(): pass\n"
+            " ```\n"
+            "+tail line after the embedded fence\n"
+        )
+        finding = forge_common.Finding(
+            id="f1", summary="issue", file="scripts/foo.py", lines="12",
+            provenance="in-diff", impact="contract-breaking",
+        )
+        brief_path = forge_run._final_review_fix_brief(
+            self.spec, diff, [finding], self.run_dir, 1
+        )
+        with open(brief_path) as f:
+            lines = f.read().splitlines()
+
+        open_idx, fence = next(
+            (i, l[: len(l) - len(l.lstrip("`"))])
+            for i, l in enumerate(lines)
+            if l.startswith("`") and l.endswith("diff")
+        )
+        close_idx = open_idx + 1 + next(
+            i for i, l in enumerate(lines[open_idx + 1 :]) if l == fence
+        )
+        body = lines[open_idx + 1 : close_idx]
+        self.assertIn(" ```python", body)
+        self.assertIn("+tail line after the embedded fence", body)
+        for line in body:
+            # Markdown fence closers permit a ≤3-space indent, so strip
+            # leading spaces before counting the backtick run (matches
+            # review-packet.py's test_fence_survives_backtick_lines_in_diff).
+            stripped = line.lstrip(" ")
+            run = len(stripped) - len(stripped.lstrip("`"))
+            self.assertLess(
+                run, len(fence),
+                "diff body line closes the outer fence early: %r" % line,
+            )
 
 
 class ReviewNonGitTests(unittest.TestCase):
